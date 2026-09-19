@@ -82,18 +82,45 @@ CACH DUNG
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import time
 
 import numpy as np
 import open3d as o3d
+from scipy.spatial import cKDTree
 
 RAW_DATA_DIR = r"D:\Backup\Thucdia-18May2026"
 
-DEFAULT_DEPTH = 7
+# [Sep 2026] depth 7 -> 8. Do tren 3 scan x 4 muc mat do x 3 muc depth:
+# depth 8 giam dien tich moi dinh tu 2.94 xuong 0.82 cm2 (o mau 1.7cm -> 0.9cm)
+# ma dien tich/moc-tru van dung va khuech dai dia y gan nhu khong doi (1.0->1.2x).
+# Depth 9 bi loai: khuech dai len 1.8-3.8x va lo hong bung (0->5, 2->12).
+# Depth 8 CHI an toan khi co diem full-res + khu nhieu ben duoi.
+DEFAULT_DEPTH = 8
 N_NORMAL_BANDS = 40
-DENSITY_QUANTILE = 0.05
+
+# [Sep 2026] 0.05 -> 0.02. Day la phan vi TOAN CUC nen no luon cat dung ngan ay
+# phan tram dinh, bat ke du lieu tot hay xau. O depth 7 la ~170 dinh rai rac,
+# vo hai; o depth 8 la ~615 dinh va chung DON vao vung thua nhat -> thung.
+# Do tren cay_0040: q=0.05 cho 2 lo, q=0.03 cho 1 lo, q=0.02 cho 0 lo, trong khi
+# dien tich/tru chi doi 1.08 -> 1.10. Vung lo co 0/36 o goc trong (camera quay
+# du vong) va 497-562 diem trong 2cm so voi 828 cho thuong -- du lieu CO, mesh
+# bo sot. Con 0.05 duoc chon hoi depth 7 la lua chon duy nhat va TRUOC khi co
+# ring trim + cat phang vanh; hai buoc do nay da lam thay viec gat phan Poisson
+# bia ra o hai dau.
+DENSITY_QUANTILE = 0.02
+
+# --- Thu hoi diem full-res -- xem docstring phan HIRES ben duoi
+HIRES_RADIUS = 0.02     # giu diem tho trong ban kinh nay quanh than da co lap
+HIRES_VOXEL  = 0.003    # ha voxel 3mm; 5mm do ra te hon han o depth 9
+
+# --- Khu nhieu vo diem
+SOR_NB         = 20     # so lan can cho remove_statistical_outlier
+SOR_STD        = 2.0
+DENOISE_SLICES = 60     # so lat khi dung profile ban kinh
+DENOISE_PULL   = 0.6    # keo diem 60% ve phia profile, khong ep han
 
 # --- Ring trim (cat lat khong khep kin) -- xem docstring patch_poisson_ring_trim.py
 RING_BINS        = 36     # bin 10 do quanh chu vi
@@ -111,6 +138,149 @@ RIM_MAX_ITER  = 6       # cat lap; thuc te hoi tu sau 2-3 lan
 # ---------------------------------------------------------------------------
 # Normals
 # ---------------------------------------------------------------------------
+
+def recover_hires_points(scan_dir: str,
+                         iso_pcd: o3d.geometry.PointCloud,
+                         radius: float = HIRES_RADIUS,
+                         voxel: float = HIRES_VOXEL,
+                         verbose: bool = True):
+    """
+    Lay lai diem DO PHAN GIAI DAY tu pointcloud.ply, quanh than da duoc co lap.
+
+    TAI SAO CAN
+    -----------
+    05_trunk_isolation.py ha voxel xuong 1cm khi point cloud > 1M diem. Viec do
+    LA CAN THIET -- gom cum 12.86M diem tren toan canh se sap RAM (xem CLAUDE.md
+    muc 5). Nhung sau khi da biet than cay nam o dau roi thi khong con ly do gi
+    phai dung ban THUA de dung mesh.
+
+    Do tren cay_0004: pointcloud.ply co 12,860,853 diem; sau khi ha voxel 1cm va
+    loc con 24,977 diem than. Nhung 709,859 diem THO nam trong 2cm cua than da
+    co lap -- gap 28 lan, va 710k la co xu ly duoc.
+
+    Nut that that su khong phai so diem tho ma la viec DUNG BAN THUA DE DUNG
+    MESH: canh tam giac mesh 20.6mm trong khi khoang cach diem chi 8.3mm.
+
+    Tra ve None neu khong co pointcloud.ply -> goi ben ngoai tu lui ve
+    trunk_pointcloud.ply.
+    """
+    raw_path = os.path.join(scan_dir, "output", "pointcloud.ply")
+    if not os.path.exists(raw_path):
+        if verbose:
+            print("  Hires: SKIP (khong co pointcloud.ply) -- dung ban da co lap",
+                  flush=True)
+        return None
+
+    t0 = time.time()
+    raw = o3d.io.read_point_cloud(raw_path)
+    n_raw = len(raw.points)
+    if n_raw == 0:
+        del raw
+        gc.collect()
+        return None
+
+    d, _ = cKDTree(np.asarray(iso_pcd.points)).query(
+        np.asarray(raw.points), k=1, workers=-1)
+    sel = np.where(d <= radius)[0]
+    if len(sel) < 1000:
+        del raw, d
+        gc.collect()
+        if verbose:
+            print(f"  Hires: SKIP (chi {len(sel)} diem trong {radius*100:.0f}cm)",
+                  flush=True)
+        return None
+
+    hires = raw.select_by_index(sel)
+    del raw, d, sel
+    gc.collect()                      # dam tho chiem ~300 MB, giai phong ngay
+
+    n_near = len(hires.points)
+    if voxel and voxel > 0:
+        hires = hires.voxel_down_sample(voxel)
+    if verbose:
+        print(f"  Hires: {n_raw:,} diem tho -> {n_near:,} quanh than -> "
+              f"{len(hires.points):,} sau voxel {voxel*1000:.0f}mm "
+              f"[{time.time()-t0:.0f}s]", flush=True)
+    return hires
+
+
+def denoise_shell(pcd: o3d.geometry.PointCloud,
+                  n_slices: int = DENOISE_SLICES,
+                  pull: float = DENOISE_PULL,
+                  n_bins: int = RING_BINS,
+                  verbose: bool = True) -> o3d.geometry.PointCloud:
+    """
+    Khu nhieu lop vo diem: loc diem lac, roi keo diem ve phia profile ban kinh
+    cua chinh lat cua no.
+
+    TAI SAO LAM TRON LA CHINH DANG
+    ------------------------------
+    Do tan ban kinh cua vo diem la 13.7mm. Cau hoi: do la NHIEU hay HINH THAT
+    cua vo cay? Neu la hinh that thi lam tron se xoa mat chi tiet that.
+
+    Phep thu tuong quan lan can cho 0.93-0.98 -> tuong "hinh that", nhung SAI:
+    cac diem sat nhau thuong den tu CUNG MOT KHUNG HINH nen chia se cung mot sai
+    so depth. Phep thu TACH DOI ngau nhien (dung hai profile doc lap tu hai nua
+    dam diem) cho tuong quan chi 0.176 -- profile khong tai lap duoc. Phan tach:
+
+        tong do tan   13.7 mm
+          nhieu         7.9 mm   <- trung binh hoa an duoc
+          hinh that     3.2 mm   <- phai giu
+
+    Voi 28x diem, nhieu giam sqrt(28) ~ 5.3 lan, tuc 7.9mm xuong ~1.5mm.
+
+    Chi keo `pull` (60%) ve phia profile chu khong ep han, de chua 3.2mm hinh
+    that. Khu nhieu la DIEU KIEN de tang depth: cay_0040 o depth 9 khong khu ra
+    27 lo, co khu con 5.
+    """
+    n_before = len(pcd.points)
+    pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=SOR_NB,
+                                            std_ratio=SOR_STD)
+    pts = np.asarray(pcd.points)
+    cols = np.asarray(pcd.colors)
+    if len(pts) < 100:
+        return pcd
+
+    y = pts[:, 1]
+    edges = np.linspace(y.min(), y.max(), n_slices + 1)
+    band = np.clip(np.searchsorted(edges, y) - 1, 0, n_slices - 1)
+    out = pts.copy()
+
+    for i in range(n_slices):
+        k = band == i
+        if k.sum() < 40:
+            continue
+        cx = float(np.median(pts[k, 0]))
+        cz = float(np.median(pts[k, 2]))
+        dx, dz = pts[k, 0] - cx, pts[k, 2] - cz
+        r = np.hypot(dx, dz)
+        ang = np.arctan2(dz, dx)
+        b = ((ang + np.pi) / (2.0 * np.pi) * n_bins).astype(int) % n_bins
+
+        prof = np.array([np.median(r[b == j]) if (b == j).sum() >= 3 else np.nan
+                         for j in range(n_bins)])
+        ok = ~np.isnan(prof)
+        if ok.sum() < n_bins // 2:
+            continue
+        prof[~ok] = np.interp(np.where(~ok)[0], np.where(ok)[0], prof[ok])
+        # lam tron VONG QUANH (noi hai dau lai truoc khi tich chap)
+        prof = np.convolve(np.r_[prof[-2:], prof, prof[:2]],
+                           np.ones(5) / 5.0, mode="valid")
+
+        r_new = r + pull * (prof[b] - r)
+        s = np.where(r > 1e-9, r_new / np.maximum(r, 1e-9), 1.0)
+        out[k, 0] = cx + dx * s
+        out[k, 2] = cz + dz * s
+
+    res = o3d.geometry.PointCloud()
+    res.points = o3d.utility.Vector3dVector(out)
+    if len(cols):
+        res.colors = o3d.utility.Vector3dVector(cols)
+    if verbose:
+        print(f"  Khu nhieu: {n_before:,} -> {len(res.points):,} diem "
+              f"(SOR bo {n_before - len(pts):,})", flush=True)
+    return res
+
 
 def orient_normals_outward(pcd: o3d.geometry.PointCloud,
                            n_bands: int = N_NORMAL_BANDS) -> o3d.geometry.PointCloud:
@@ -433,6 +603,10 @@ def process_scan(scan_dir: str,
                  ring_bridge: int = RING_BRIDGE,
                  rim_flatten: bool = True,
                  rim_tol: float = RIM_FLAT_TOL,
+                 hires: bool = True,
+                 hires_radius: float = HIRES_RADIUS,
+                 hires_voxel: float = HIRES_VOXEL,
+                 denoise: bool = True,
                  verbose: bool = True) -> dict:
     name = os.path.basename(scan_dir.rstrip("/\\"))
     out_dir = os.path.join(scan_dir, "output")
@@ -462,8 +636,22 @@ def process_scan(scan_dir: str,
     if verbose:
         print(f"  Loaded {n_pts:,} trunk points", flush=True)
 
+    # h_orig do tu dam DA CO LAP, KHONG phai dam hires -- no la mau so cua
+    # mesh_kept_frac, tuc co so cua co chat luong ring_flag. Doi mau so se lam
+    # moi nguong cu vo nghia.
     _p0 = np.asarray(pcd.points)
     h_orig = float(_p0[:, 1].max() - _p0[:, 1].min())
+
+    # --- Thu hoi diem full-res roi khu nhieu -------------------------------
+    n_hires = 0
+    if hires:
+        _hi = recover_hires_points(scan_dir, pcd, radius=hires_radius,
+                                   voxel=hires_voxel, verbose=verbose)
+        if _hi is not None:
+            pcd = _hi
+            n_hires = len(pcd.points)
+    if denoise:
+        pcd = denoise_shell(pcd, verbose=verbose)
 
     # --- Ring trim: bo cac lat cat khong khep kin ---------------------------
     # Chi cat BAN SAO TRONG BO NHO. KHONG ghi de trunk_pointcloud.ply tren dia:
@@ -540,6 +728,10 @@ def process_scan(scan_dir: str,
         })
     result["rim_cut_top_cm"] = round(cut_top * 100, 1)
     result["rim_cut_bot_cm"] = round(cut_bot * 100, 1)
+    result["n_pts_iso"]   = n_pts
+    result["n_pts_hires"] = n_hires
+    result["denoised"]    = bool(denoise)
+    result["depth"]       = depth
 
     # mesh_kept_frac = chieu cao mesh CUOI CUNG / chieu cao point cloud GOC.
     # Day moi la con so quyet dinh co gan co hay khong: ring_kept_frac chi tinh
@@ -561,7 +753,11 @@ def run_batch(raw_data_dir: str, scan_filter=None, depth: int = DEFAULT_DEPTH,
               ring_slice: float = RING_SLICE_M,
               ring_bridge: int = RING_BRIDGE,
               rim_flatten: bool = True,
-              rim_tol: float = RIM_FLAT_TOL) -> None:
+              rim_tol: float = RIM_FLAT_TOL,
+              hires: bool = True,
+              hires_radius: float = HIRES_RADIUS,
+              hires_voxel: float = HIRES_VOXEL,
+              denoise: bool = True) -> None:
     scan_dirs = sorted(
         os.path.join(raw_data_dir, d)
         for d in os.listdir(raw_data_dir)
@@ -583,7 +779,11 @@ def run_batch(raw_data_dir: str, scan_filter=None, depth: int = DEFAULT_DEPTH,
                                         ring_slice=ring_slice,
                                         ring_bridge=ring_bridge,
                                         rim_flatten=rim_flatten,
-                                        rim_tol=rim_tol))
+                                        rim_tol=rim_tol,
+                                        hires=hires,
+                                        hires_radius=hires_radius,
+                                        hires_voxel=hires_voxel,
+                                        denoise=denoise))
         except Exception as e:
             results.append({"name": os.path.basename(scan_dir), "ok": False,
                             "msg": f"loi: {e}"})
@@ -629,6 +829,8 @@ def run_batch(raw_data_dir: str, scan_filter=None, depth: int = DEFAULT_DEPTH,
 
 
 def main():
+    global DENSITY_QUANTILE     # --density-quantile ghi de hang so o module
+
     p = argparse.ArgumentParser(
         description="Dung mesh than cay bang Poisson tu trunk_pointcloud.ply")
     g = p.add_mutually_exclusive_group(required=True)
@@ -655,7 +857,24 @@ def main():
     p.add_argument("--rim-tol", type=float, default=RIM_FLAT_TOL,
                    help=f"Vanh trai dai qua muc nay (m) thi coi la rang cua "
                         f"(default {RIM_FLAT_TOL})")
+    p.add_argument("--no-hires", action="store_true",
+                   help="Khong thu hoi diem full-res tu pointcloud.ply; dung "
+                        "ban da ha voxel 1cm nhu truoc (nhanh hon nhieu)")
+    p.add_argument("--hires-radius", type=float, default=HIRES_RADIUS,
+                   help=f"Ban kinh (m) quanh than de thu hoi diem tho "
+                        f"(default {HIRES_RADIUS})")
+    p.add_argument("--hires-voxel", type=float, default=HIRES_VOXEL,
+                   help=f"Ha voxel dam hires xuong muc nay (m) "
+                        f"(default {HIRES_VOXEL}; 0.005 do ra te hon o depth cao)")
+    p.add_argument("--no-denoise", action="store_true",
+                   help="Khong khu nhieu vo diem. Luu y: depth >= 8 gan nhu "
+                        "chac chan se thung neu bo buoc nay")
+    p.add_argument("--density-quantile", type=float, default=DENSITY_QUANTILE,
+                   help=f"Phan vi mat do de cat dinh Poisson "
+                        f"(default {DENSITY_QUANTILE}; 0.05 la gia tri cu, gay "
+                        f"thung o depth 8)")
     args = p.parse_args()
+    DENSITY_QUANTILE = args.density_quantile
 
     run_batch(args.raw_data, scan_filter=args.scan, depth=args.depth,
               skip_existing=args.skip_existing,
@@ -664,7 +883,11 @@ def main():
               ring_slice=args.ring_slice,
               ring_bridge=args.ring_bridge,
               rim_flatten=not args.no_rim_flatten,
-              rim_tol=args.rim_tol)
+              rim_tol=args.rim_tol,
+              hires=not args.no_hires,
+              hires_radius=args.hires_radius,
+              hires_voxel=args.hires_voxel,
+              denoise=not args.no_denoise)
 
 
 if __name__ == "__main__":

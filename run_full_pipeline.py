@@ -213,7 +213,7 @@ SCRIPT_MODULE_CHECKS = {
     "02_pointcloud_and_mesh.py": ["numpy", "cv2", "open3d"],
     "05_trunk_isolation.py": ["numpy", "open3d"],
     "02_mesh_tsdf.py": ["numpy", "open3d", "PIL", "scipy"],
-    "02_mesh_poisson_trunk.py": ["numpy", "open3d"],
+    "02_mesh_poisson_trunk.py": ["numpy", "open3d", "scipy"],
     "03_recolor_mesh.py": ["numpy", "open3d", "scipy"],
     "04_trim_mesh.py": ["numpy", "open3d", "scipy"],
     "04b_finalize_mesh.py": ["numpy", "open3d"],
