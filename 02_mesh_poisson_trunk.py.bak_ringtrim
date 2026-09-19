@@ -1,0 +1,309 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+02_mesh_poisson_trunk.py
+========================
+Dung mesh than cay bang Poisson Surface Reconstruction TU trunk_pointcloud.ply
+(dau ra cua 05_trunk_isolation.py), thay cho mesh TSDF o buoc 4.
+
+Input : <scan>/output/trunk_pointcloud.ply
+Output: <scan>/output/trunk_mesh_poisson.ply
+
+TAI SAO CAN BUOC NAY (xem CLAUDE.md muc 12 item 15)
+---------------------------------------------------
+trunk_mesh_tsdf.ply co nhung lo THUNG LON tren dung phan than cay DA DUOC
+QUET. Nguyen nhan da duoc do va khoanh vung: TSDF cua Open3D do khoang cach
+DOC THEO TIA CAMERA. O goc nhin xien theta, khoang cach doc tia bi keo dai
+1/cos(theta) -- 60 do la gap doi, 80 do gap 5.8 lan -- nen voxel nam sat be
+mat lai bi tinh la xa, roi ra ngoai dai sdf_trunc va KHONG BAO GIO duoc tich
+hop. Khong tich luy trong so thi khong co mat dang tri.
+
+Do duoc: goc nhin tot nhat ma bat ky camera nao dat duoc tren phan be mat bi
+mat la 52-58 do (p50), so voi 11-22 do tren phan con nguyen. Va so lo tuong
+quan -0.93 voi do manh cua than tren cay_0004 (tren r_p90 6.0cm khong co lo
+nao; duoi 5.8cm thi tang deu), vi than cang manh thi ty le be mat nam o goc
+xien cang lon.
+
+DA THU VA LOAI TRU 11 CAU HINH TSDF: sdf_trunc 0.010/0.015/0.025/0.05/0.08/
+0.12/0.16, voxel 0.005 va 0.008, conf_thresh 0 va 1, cong them mot bo loc
+"diem bay" o mep do sau. Trong pham vi than cay so vong bien gan nhu khong
+doi (29-32 vong, 5-9 vong >=30 dinh) trong khi ban kinh mesh phinh tu 1.28x
+len 2.44x. Bo loc mep con lam mat 11-24% be mat ma khong giam lo. Tuc cac lo
+nay do DU LIEU quyet dinh, khong phai do tham so.
+
+Poisson khong gap van de do vi no KHOP MOT MAT VAO DAM DIEM thay vi hoa doc
+theo tia camera, nen dung duoc chinh nhung diem ma TSDF phai bo. Diem quan
+trong: du lieu diem trong cac lo VAN DAY DU va khong he te hon noi khac (do
+duoc: lop vo diem day 2.7cm trong lo so voi 2.6-5.6cm vung lanh; mat do
+33 diem/do so voi 20 diem/do).
+
+DO TREN CA 46 SCAN, Poisson bam diem tot hon TSDF o MOI cay:
+  - 95% dinh mesh nam trong 0.7-0.9cm cua mot diem that (TSDF: 2.6-44cm)
+  - phinh ban kinh 0.95-1.07x (TSDF: 0.95-15.3x)
+
+CHON --depth BANG SO DO, KHONG PHAI BANG MAT
+--------------------------------------------
+Moc doi chieu la dien tich hinh tru suy ra tu chinh point cloud
+(2*pi*r_med*h). Day la so quan trong vi 05_detect_lichen.py tinh total_cm2 tu
+dien tich TAM GIAC cua mesh. Do tren 7 scan dai dien, dien tich sau khi lam
+muot Taubin (dung tham so ma 04b_finalize_mesh.py van dung) chia cho moc tru:
+
+    depth   lo lon nhat   phinh ban kinh   dien tich / tru
+      6        8 -  36      1.02-1.04         0.92-1.27      (mesh qua thua)
+      7       18 -  75      0.98-1.12         0.92-1.52      <-- CHON
+      8       42 - 216      1.01-1.13         1.04-1.91
+      9      136 - 651      1.00-1.07         1.16-3.10      (bam nhieu)
+    TSDF     374 -1383      0.95-1.62         0.35-1.25      (thieu be mat)
+
+Depth cao bam theo nhieu cua lop vo diem day 2.7-5.6cm va tao mat nhan nhum,
+lam PHONG dien tich; depth 6 thi mesh qua thua (co cay duoi 1,000 dinh).
+Luu y: chi so "khoang cach toi diem gan nhat" DANH LUA o day -- depth 9 dat
+0.7cm chinh vi no bam vao nhieu; moc hinh tru moi la thuoc do dang tin.
+
+Canh bao: TSDF hien dang do THIEU dien tich rat nhieu tren mot so cay
+(cay_0009 chi bang 0.35x moc tru, tuc mat 65% be mat; cay_0013 0.57x;
+cay_0010 0.75x), nen total_cm2 trong lichen_stats.json hien co DA SAI SAN,
+khong phai se sai sau khi doi.
+
+PHAP TUYEN
+----------
+Poisson can phap tuyen co huong nhat quan. Thay vi lan truyen theo mat phang
+tiep tuyen (khong dang tin tren lop vo diem day ~3cm), o day phap tuyen duoc
+lat ra NGOAI so voi truc cua CHINH LAT CAT do -- huong "ra ngoai" dung ve mat
+vat ly cho mot than cay.
+
+CACH DUNG
+---------
+    python 02_mesh_poisson_trunk.py --scan cay_0007_1805
+    python 02_mesh_poisson_trunk.py --all
+    python 02_mesh_poisson_trunk.py --all --depth 8 --skip-existing
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import time
+
+import numpy as np
+import open3d as o3d
+
+RAW_DATA_DIR = r"D:\Backup\Thucdia-18May2026"
+
+DEFAULT_DEPTH = 7
+N_NORMAL_BANDS = 40
+DENSITY_QUANTILE = 0.05
+
+
+# ---------------------------------------------------------------------------
+# Normals
+# ---------------------------------------------------------------------------
+
+def orient_normals_outward(pcd: o3d.geometry.PointCloud,
+                           n_bands: int = N_NORMAL_BANDS) -> o3d.geometry.PointCloud:
+    """
+    Uoc tinh phap tuyen roi lat chung ra NGOAI so voi truc cua tung lat cat.
+
+    Khong dung orient_normals_consistent_tangent_plane(): lop vo diem cua scan
+    that day toi 2.7-5.6cm, nen lan truyen huong theo mat phang tiep tuyen rat
+    de bi lat nham va tao ra mat Poisson lon xon. Truc than cay thi luon biet
+    duoc, va "ra xa truc" chinh la huong ngoai that su.
+    """
+    pts = np.asarray(pcd.points)
+    pcd.estimate_normals(
+        o3d.geometry.KDTreeSearchParamHybrid(radius=0.03, max_nn=30))
+
+    y = pts[:, 1]
+    edges = np.linspace(y.min(), y.max(), n_bands + 1)
+    band = np.clip(np.searchsorted(edges, y) - 1, 0, n_bands - 1)
+
+    normals = np.asarray(pcd.normals).copy()
+    for i in range(n_bands):
+        k = band == i
+        if k.sum() < 30:
+            continue
+        cx = float(np.median(pts[k, 0]))
+        cz = float(np.median(pts[k, 2]))
+        radial = np.stack(
+            [pts[k, 0] - cx, np.zeros(int(k.sum())), pts[k, 2] - cz], axis=1)
+        radial /= np.maximum(np.linalg.norm(radial, axis=1, keepdims=True), 1e-9)
+        sub = normals[k]
+        sub[np.einsum("ij,ij->i", sub, radial) < 0] *= -1
+        normals[k] = sub
+
+    pcd.normals = o3d.utility.Vector3dVector(normals)
+    return pcd
+
+
+# ---------------------------------------------------------------------------
+# Poisson
+# ---------------------------------------------------------------------------
+
+def poisson_trunk_mesh(pcd: o3d.geometry.PointCloud,
+                       depth: int = DEFAULT_DEPTH,
+                       verbose: bool = True) -> o3d.geometry.TriangleMesh:
+    """Poisson + cat vung mat do thap + cat phan ngoai tam cao cua point cloud."""
+    pts = np.asarray(pcd.points)
+    y_min, y_max = float(pts[:, 1].min()), float(pts[:, 1].max())
+
+    mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+        pcd, depth=depth, width=0, scale=1.1, linear_fit=False)
+    densities = np.asarray(densities)
+    n_raw = len(mesh.vertices)
+
+    # Poisson luon tra ve mot mat KIN, nen no "doan" them phan khong co diem
+    # nao chong lung. Cat theo mat do de bo dung phan bia do.
+    if len(densities):
+        thr = float(np.quantile(densities, DENSITY_QUANTILE))
+        mesh.remove_vertices_by_mask(densities <= thr)
+        mesh.remove_unreferenced_vertices()
+        mesh.remove_degenerate_triangles()
+
+    # Poisson cung keo dai qua dau va qua goc (nap kin). Cat ve dung tam cao
+    # cua point cloud.
+    verts = np.asarray(mesh.vertices)
+    if len(verts):
+        outside = (verts[:, 1] < y_min) | (verts[:, 1] > y_max)
+        if outside.any():
+            mesh.remove_vertices_by_mask(outside)
+            mesh.remove_unreferenced_vertices()
+            mesh.remove_degenerate_triangles()
+
+    mesh.remove_duplicated_vertices()
+    mesh.remove_duplicated_triangles()
+    mesh.compute_vertex_normals()
+
+    if verbose:
+        print(f"  Poisson depth={depth}: {n_raw:,} -> {len(mesh.vertices):,} verts  "
+              f"{len(mesh.triangles):,} tris", flush=True)
+    return mesh
+
+
+def keep_largest_component(mesh: o3d.geometry.TriangleMesh):
+    """Giu connected component nhieu tam giac nhat."""
+    labels, counts, _ = mesh.cluster_connected_triangles()
+    labels = np.asarray(labels)
+    counts = np.asarray(counts)
+    if len(counts) <= 1:
+        return mesh, 0
+    keep = int(np.argmax(counts))
+    drop = labels != keep
+    n_drop = int(drop.sum())
+    mesh.remove_triangles_by_mask(drop)
+    mesh.remove_unreferenced_vertices()
+    return mesh, n_drop
+
+
+# ---------------------------------------------------------------------------
+# Per-scan
+# ---------------------------------------------------------------------------
+
+def process_scan(scan_dir: str,
+                 depth: int = DEFAULT_DEPTH,
+                 skip_existing: bool = False,
+                 verbose: bool = True) -> dict:
+    name = os.path.basename(scan_dir.rstrip("/\\"))
+    out_dir = os.path.join(scan_dir, "output")
+    result = {"name": name, "ok": False, "msg": ""}
+
+    pcd_path = os.path.join(out_dir, "trunk_pointcloud.ply")
+    out_path = os.path.join(out_dir, "trunk_mesh_poisson.ply")
+
+    if not os.path.exists(pcd_path):
+        result["msg"] = "trunk_pointcloud.ply not found -- chay 05_trunk_isolation.py truoc"
+        return result
+    if skip_existing and os.path.exists(out_path):
+        result.update({"ok": True, "msg": "skip (da co)"})
+        return result
+
+    t0 = time.time()
+    if verbose:
+        print(f"\n{'='*60}")
+        print(f"Poisson trunk mesh: {name}")
+        print(f"{'='*60}", flush=True)
+
+    pcd = o3d.io.read_point_cloud(pcd_path)
+    n_pts = len(pcd.points)
+    if n_pts < 1000:
+        result["msg"] = f"point cloud qua it diem ({n_pts})"
+        return result
+    if verbose:
+        print(f"  Loaded {n_pts:,} trunk points", flush=True)
+
+    orient_normals_outward(pcd)
+    mesh = poisson_trunk_mesh(pcd, depth=depth, verbose=verbose)
+
+    if len(mesh.vertices) < 100:
+        result["msg"] = "mesh rong sau khi cat mat do -- thu tang --depth"
+        return result
+
+    mesh, n_drop = keep_largest_component(mesh)
+    if verbose and n_drop:
+        print(f"  Keep largest component: removed {n_drop:,} fragment tris", flush=True)
+
+    os.makedirs(out_dir, exist_ok=True)
+    o3d.io.write_triangle_mesh(out_path, mesh)
+
+    elapsed = time.time() - t0
+    result.update({
+        "ok": True,
+        "msg": f"verts:{len(mesh.vertices):,} tris:{len(mesh.triangles):,} [{elapsed:.0f}s]",
+    })
+    if verbose:
+        print(f"  Saved {out_path}  [{elapsed:.0f}s]", flush=True)
+    return result
+
+
+def run_batch(raw_data_dir: str, scan_filter=None, depth: int = DEFAULT_DEPTH,
+              skip_existing: bool = False) -> None:
+    scan_dirs = sorted(
+        os.path.join(raw_data_dir, d)
+        for d in os.listdir(raw_data_dir)
+        if os.path.isdir(os.path.join(raw_data_dir, d))
+        and os.path.exists(os.path.join(raw_data_dir, d, "output", "trunk_pointcloud.ply"))
+    )
+    if scan_filter:
+        scan_dirs = [d for d in scan_dirs if os.path.basename(d) == scan_filter]
+
+    print(f"Found {len(scan_dirs)} scans with trunk_pointcloud.ply  (depth={depth})")
+
+    results = []
+    for scan_dir in scan_dirs:
+        try:
+            results.append(process_scan(scan_dir, depth=depth,
+                                        skip_existing=skip_existing))
+        except Exception as e:
+            results.append({"name": os.path.basename(scan_dir), "ok": False,
+                            "msg": f"loi: {e}"})
+
+    ok = sum(1 for r in results if r["ok"])
+    print(f"\n{'='*60}")
+    print(f"Batch done: {ok} ok, {len(results)-ok} failed")
+    for r in results:
+        if not r["ok"]:
+            print(f"  - {r['name']}: {r['msg']}")
+
+    with open(os.path.join(raw_data_dir, "poisson_summary.json"), "w") as f:
+        json.dump({"depth": depth, "results": results}, f, indent=2)
+
+
+def main():
+    p = argparse.ArgumentParser(
+        description="Dung mesh than cay bang Poisson tu trunk_pointcloud.ply")
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--scan", metavar="NAME")
+    g.add_argument("--all", action="store_true")
+    p.add_argument("--raw-data", default=RAW_DATA_DIR)
+    p.add_argument("--depth", type=int, default=DEFAULT_DEPTH,
+                   help=f"Poisson octree depth (default {DEFAULT_DEPTH}). Cao hon = "
+                        f"bam nhieu hon va PHONG dien tich; xem docstring")
+    p.add_argument("--skip-existing", action="store_true")
+    args = p.parse_args()
+
+    run_batch(args.raw_data, scan_filter=args.scan, depth=args.depth,
+              skip_existing=args.skip_existing)
+
+
+if __name__ == "__main__":
+    main()

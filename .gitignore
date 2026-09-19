@@ -1,0 +1,39 @@
+# Virtual environments
+.venv/
+venv/
+3d_scan/venv311/
+
+# Python bytecode
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# OS
+.DS_Store
+
+# Local runtime files
+.preview.pid
+
+# Raw/input datasets
+Raw_data/
+missing_data/
+
+# Large geometry and generated artifacts
+*.ply
+*.obj
+*.stl
+*.las
+*.laz
+*.pcd
+
+# Archives
+*.zip
+*.rar
+
+# Generated outputs/reports
+export_lichen_data.csv
+raw_data_validation_report.json
+
+# Corpse of the corrupted repository, kept for reference (see CLAUDE.md)
+.git_corrupt_*/

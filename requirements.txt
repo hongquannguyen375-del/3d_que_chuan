@@ -1,0 +1,18 @@
+# requirements.txt - 3D_Que_lichen pipeline
+# Da kiem chung tuong thich lan nhau cho Python 3.10, Windows x64 (win_amd64), CPU-only.
+# Cai bang:  pip install -r requirements.txt
+
+numpy==2.2.6
+scipy==1.15.3
+opencv-python==5.0.0.93
+pillow==12.3.0
+open3d==0.19.0
+dash==4.4.1
+pydantic==2.13.4
+plotly==6.9.0
+imageio-ffmpeg==0.6.0
+
+# Cac thu vien duoi day duoc open3d==0.19.0 tu dong cai kem (transitive dependency),
+# khong can khai bao tay - pip se tu chon dung ban tuong thich Python 3.10:
+#   matplotlib, pandas, scikit-learn, pyyaml, tqdm, pyquaternion, addict,
+#   flask, werkzeug, nbformat, ipywidgets, configargparse
