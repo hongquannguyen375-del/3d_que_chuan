@@ -60,6 +60,20 @@ import time
 from pathlib import Path
 
 
+# [Sep 2026] File NAY la ngoai le duy nhat cua quy uoc thuan-ASCII (CLAUDE.md
+# muc 5): moi chuoi help va log deu co dau tieng Viet. Tren console cp1252 mac
+# dinh cua Windows, ngay ca `--help` cung do UnicodeEncodeError va khong in noi
+# mot dong nao -- da kiem chung tren ca ban truoc lan ban nay. Quy uoc san co
+# cua repo la truyen PYTHONIOENCODING/PYTHONUTF8 cho tien trinh CON; khong co gi
+# dat cho chinh tien trinh nay. errors="replace" de truong hop xau nhat la chu
+# bi thay bang '?', chu khong phai mot traceback.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
+
 # --------------------------------------------------------------------------- #
 #  Cấu hình chung
 # --------------------------------------------------------------------------- #
@@ -221,6 +235,12 @@ SCRIPT_MODULE_CHECKS = {
     "06_slope_analysis.py": ["numpy", "open3d"],
 }
 
+# Thứ tự các bước, đánh số THEO CLAUDE.md §3a (bước 4 = TSDF, 4b = Poisson).
+# Trước đây banner in "4/8" cho Poisson và "4a/8" cho TSDF, lệch với tài liệu;
+# đã sửa cho khớp, nếu không thì gõ `--from-step 4b` lại thấy hiện ra "4/8".
+STEP_ORDER = ["1", "2", "3", "4", "4b", "5", "6", "7", "8"]
+STEP_ALIAS = {"4a": "4"}      # nhãn cũ của bước TSDF
+
 
 def check_import_module(python_exe: str, module_name: str) -> None:
     """Verify the chosen Python interpreter can import a required module."""
@@ -274,9 +294,22 @@ def main() -> None:
                          help="Chạy thêm 02_mesh_tsdf.py (bước 4a). Mặc định KHÔNG "
                               "chạy: hình học nay lấy từ Poisson, mesh TSDF không "
                               "còn được dùng ở bước nào (xem CLAUDE.md §12 item 15)")
-    parser.add_argument("--poisson-depth", type=int, default=7,
-                         help="Độ sâu Poisson cho 02_mesh_poisson_trunk.py "
-                              "(mặc định 7 — đã chọn bằng số đo, xem CLAUDE.md §5)")
+    parser.add_argument("--poisson-depth", type=int, default=None,
+                         help="Độ sâu Poisson cho 02_mesh_poisson_trunk.py. "
+                              "Không gõ thì KHÔNG truyền xuống, để script con "
+                              "tự dùng mặc định của nó cộng với lựa chọn riêng "
+                              "từng cây trong poisson_overrides.json — một "
+                              "nguồn sự thật duy nhất (xem CLAUDE.md §5)")
+    parser.add_argument("--set-poisson-depth", action="store_true",
+                         help="Ghi nhớ --poisson-depth cho riêng cây này, để "
+                              "lần chạy toàn bộ corpus sau vẫn dùng. Chuyển "
+                              "thẳng xuống --set-depth của bước 4b")
+    parser.add_argument("--from-step", default=None, metavar="ID",
+                         choices=STEP_ORDER + list(STEP_ALIAS),
+                         help="Bỏ qua mọi bước trước mốc này và chạy từ đây trở "
+                              "đi, đè lên output cũ. Dùng khi chỉ muốn dựng lại "
+                              "mesh ở depth khác: `--from-step 4b`. "
+                              "Giá trị: " + ", ".join(STEP_ORDER))
     parser.add_argument("--resume", action="store_true",
                          help="Bỏ qua bước đã có output, chạy tiếp từ chỗ dừng")
     parser.add_argument("--force", action="store_true",
@@ -309,6 +342,21 @@ def main() -> None:
 
     check_raw_data(scan_dir)
 
+    # -- Chọn bước bắt đầu -------------------------------------------------- #
+    from_step = STEP_ALIAS.get(args.from_step, args.from_step)
+    from_idx = STEP_ORDER.index(from_step) if from_step else 0
+    if from_step:
+        # Cả điểm của --from-step là dựng lại đè lên file cũ, nên nó bao hàm
+        # --force: nếu không, script con thấy output cũ còn đó sẽ tự bỏ qua và
+        # chẳng có gì được dựng lại.
+        args.force = True
+        log(f"  --from-step {args.from_step}: chạy từ bước {from_step} trở đi, "
+            f"đè lên output cũ")
+
+    def want(step_id: str) -> bool:
+        """True nếu bước này nằm từ mốc --from-step trở đi."""
+        return STEP_ORDER.index(step_id) >= from_idx
+
     # -- Tham số dùng chung cho các script kiểu --scan / --raw-data -------- #
     scan_args = ["--scan", scan_name, "--raw-data", str(raw_data_dir)]
     if args.force:
@@ -320,47 +368,59 @@ def main() -> None:
     else:
         scan_args.append("--skip-existing")
 
+    # -- Tham số riêng của bước 4b ------------------------------------------ #
+    poisson_args = list(scan_args)
+    if args.poisson_depth is not None:
+        poisson_args += ["--depth", str(args.poisson_depth)]
+    if args.set_poisson_depth:
+        if args.poisson_depth is None:
+            die("--set-poisson-depth cần biết ghi nhớ gì, hãy kèm --poisson-depth N")
+        poisson_args.append("--set-depth")
+
     try:
         # Bước 1: rgb.mp4 + depth/ -> rgb/*.jpg
-        check_script_modules(args.python, scripts_dir / "01_extract_rgb_frames.py")
-        run_step(
-            "1/8", "Trích khung hình RGB từ video (01_extract_rgb_frames.py)",
-            args.python, scripts_dir / "01_extract_rgb_frames.py",
-            [str(scan_dir)], scripts_dir,
-            expected_outputs=[scan_dir / "rgb"],
-            resume=args.resume,
-        )
+        if want("1"):
+            check_script_modules(args.python, scripts_dir / "01_extract_rgb_frames.py")
+            run_step(
+                "1/8", "Trích khung hình RGB từ video (01_extract_rgb_frames.py)",
+                args.python, scripts_dir / "01_extract_rgb_frames.py",
+                [str(scan_dir)], scripts_dir,
+                expected_outputs=[scan_dir / "rgb"],
+                resume=args.resume,
+            )
 
         # Bước 2: depth/+rgb/+camera_matrix.csv -> output/pointcloud.ply
-        check_script_modules(args.python, scripts_dir / "02_pointcloud_and_mesh.py")
-        run_step(
-            "2/8", "Dựng point cloud + mesh nhanh (02_pointcloud_and_mesh.py)",
-            args.python, scripts_dir / "02_pointcloud_and_mesh.py",
-            [str(scan_dir), "--no-visualize"], scripts_dir,
-            expected_outputs=[out_dir / "pointcloud.ply"],
-            resume=args.resume,
-        )
+        if want("2"):
+            check_script_modules(args.python, scripts_dir / "02_pointcloud_and_mesh.py")
+            run_step(
+                "2/8", "Dựng point cloud + mesh nhanh (02_pointcloud_and_mesh.py)",
+                args.python, scripts_dir / "02_pointcloud_and_mesh.py",
+                [str(scan_dir), "--no-visualize"], scripts_dir,
+                expected_outputs=[out_dir / "pointcloud.ply"],
+                resume=args.resume,
+            )
 
         # Bước 3: output/pointcloud.ply -> output/trunk_pointcloud.ply
-        check_script_modules(args.python, scripts_dir / "05_trunk_isolation.py")
-        run_step(
-            "3/8", "Cô lập thân cây khỏi point cloud (05_trunk_isolation.py)",
-            args.python, scripts_dir / "05_trunk_isolation.py",
-            [str(scan_dir), "--trunk-radius", str(args.trunk_radius)],
-            scripts_dir,
-            expected_outputs=[out_dir / "trunk_pointcloud.ply"],
-            resume=args.resume,
-        )
+        if want("3"):
+            check_script_modules(args.python, scripts_dir / "05_trunk_isolation.py")
+            run_step(
+                "3/8", "Cô lập thân cây khỏi point cloud (05_trunk_isolation.py)",
+                args.python, scripts_dir / "05_trunk_isolation.py",
+                [str(scan_dir), "--trunk-radius", str(args.trunk_radius)],
+                scripts_dir,
+                expected_outputs=[out_dir / "trunk_pointcloud.ply"],
+                resume=args.resume,
+            )
 
         # Bước 4a (tuỳ chọn): depth/+rgb/+odometry.csv -> trunk_mesh_tsdf.ply
         # Không chạy mặc định. Mesh TSDF dựng lại hình học TỪ ẢNH THÔ nên không
         # kế thừa bất kỳ bản vá nào của 05_trunk_isolation.py — nó mesh cả cảnh
         # (đo được: rộng 1.3–2.7m so với thân cây 0.13–0.68m) và có lỗ thủng trên
         # đúng phần thân đã được quét. Giữ lại chỉ để so sánh/đối chiếu.
-        if args.with_tsdf:
+        if args.with_tsdf and want("4"):
             check_script_modules(args.python, scripts_dir / "02_mesh_tsdf.py")
             run_step(
-                "4a/8", "Dựng mesh TSDF để đối chiếu (02_mesh_tsdf.py)",
+                "4/8", "Dựng mesh TSDF để đối chiếu (02_mesh_tsdf.py)",
                 args.python, scripts_dir / "02_mesh_tsdf.py",
                 scan_args, scripts_dir,
                 expected_outputs=[out_dir / "trunk_mesh_tsdf.ply"],
@@ -372,48 +432,52 @@ def main() -> None:
         # 05_trunk_isolation.py cô lập, nên hình học và màu cùng một nguồn và
         # bước 6 không còn phải hoà giải hai thứ khác nhau (đo được: bước 6 nay
         # chỉ tỉa 3.2–3.5% số đỉnh).
-        check_script_modules(args.python, scripts_dir / "02_mesh_poisson_trunk.py")
-        run_step(
-            "4/8", "Dựng mesh thân cây bằng Poisson (02_mesh_poisson_trunk.py)",
-            args.python, scripts_dir / "02_mesh_poisson_trunk.py",
-            scan_args + ["--depth", str(args.poisson_depth)], scripts_dir,
-            expected_outputs=[out_dir / "trunk_mesh_poisson.ply"],
-            resume=args.resume,
-        )
+        if want("4b"):
+            check_script_modules(args.python, scripts_dir / "02_mesh_poisson_trunk.py")
+            run_step(
+                "4b/8", "Dựng mesh thân cây bằng Poisson (02_mesh_poisson_trunk.py)",
+                args.python, scripts_dir / "02_mesh_poisson_trunk.py",
+                poisson_args, scripts_dir,
+                expected_outputs=[out_dir / "trunk_mesh_poisson.ply"],
+                resume=args.resume,
+            )
 
         # Bước 5: trunk_mesh_poisson.ply + trunk_pointcloud.ply -> trunk_mesh_recolored.ply
-        check_script_modules(args.python, scripts_dir / "03_recolor_mesh.py")
-        run_step(
-            "5/8", "Tô màu lại mesh (03_recolor_mesh.py)",
-            args.python, scripts_dir / "03_recolor_mesh.py",
-            scan_args, scripts_dir,
-            expected_outputs=[out_dir / "trunk_mesh_recolored.ply"],
-            resume=args.resume,
-        )
+        if want("5"):
+            check_script_modules(args.python, scripts_dir / "03_recolor_mesh.py")
+            run_step(
+                "5/8", "Tô màu lại mesh (03_recolor_mesh.py)",
+                args.python, scripts_dir / "03_recolor_mesh.py",
+                scan_args, scripts_dir,
+                expected_outputs=[out_dir / "trunk_mesh_recolored.ply"],
+                resume=args.resume,
+            )
 
         # Bước 6: trunk_mesh_recolored.ply + location.csv -> trunk_mesh_trimmed.ply
-        check_script_modules(args.python, scripts_dir / "04_trim_mesh.py")
-        run_step(
-            "6/8", "Cắt/lọc mesh theo phương trọng lực (04_trim_mesh.py)",
-            args.python, scripts_dir / "04_trim_mesh.py",
-            scan_args, scripts_dir,
-            expected_outputs=[out_dir / "trunk_mesh_trimmed.ply"],
-            resume=args.resume,
-        )
+        if want("6"):
+            check_script_modules(args.python, scripts_dir / "04_trim_mesh.py")
+            run_step(
+                "6/8", "Cắt/lọc mesh theo phương trọng lực (04_trim_mesh.py)",
+                args.python, scripts_dir / "04_trim_mesh.py",
+                scan_args, scripts_dir,
+                expected_outputs=[out_dir / "trunk_mesh_trimmed.ply"],
+                resume=args.resume,
+            )
 
         # Bước 7: trunk_mesh_trimmed.ply + imu.csv -> trunk_mesh_final.ply
-        check_script_modules(args.python, scripts_dir / "04b_finalize_mesh.py")
-        run_step(
-            "7/8", "Làm mịn + bịt 2 đầu mesh (04b_finalize_mesh.py)",
-            args.python, scripts_dir / "04b_finalize_mesh.py",
-            scan_args, scripts_dir,
-            expected_outputs=[out_dir / "trunk_mesh_final.ply"],
-            resume=args.resume,
-        )
+        if want("7"):
+            check_script_modules(args.python, scripts_dir / "04b_finalize_mesh.py")
+            run_step(
+                "7/8", "Làm mịn + bịt 2 đầu mesh (04b_finalize_mesh.py)",
+                args.python, scripts_dir / "04b_finalize_mesh.py",
+                scan_args, scripts_dir,
+                expected_outputs=[out_dir / "trunk_mesh_final.ply"],
+                resume=args.resume,
+            )
 
         final_model = out_dir / "trunk_mesh_final.ply"
 
-        if not args.skip_lichen:
+        if not args.skip_lichen and want("8"):
             # Bước 8: trunk_mesh_final.ply + trunk_pointcloud.ply -> trunk_mesh_detected.ply
             check_script_modules(args.python, scripts_dir / "05_detect_lichen.py")
             run_step(
@@ -427,7 +491,7 @@ def main() -> None:
                 resume=args.resume,
             )
             final_model = out_dir / "trunk_mesh_detected.ply"
-        else:
+        elif args.skip_lichen:
             log("\n  (--skip-lichen: bỏ qua bước phát hiện địa y)")
 
         if args.with_slope:
