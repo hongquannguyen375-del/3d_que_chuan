@@ -30,6 +30,8 @@ import numpy as np
 import open3d as o3d
 from scipy.spatial.transform import Rotation
 
+from pipeline_io import dump_summary, merged_results
+
 RAW_DATA_DIR = os.path.join(os.path.dirname(__file__), "Raw_data")
 
 # Phan tram moi dau/cuoi truc cay se bi force = bark (tranh rac o ngon/goc)
@@ -563,7 +565,7 @@ def process_scan(scan_dir: str,
 # ── Batch ─────────────────────────────────────────────────────────────────────
 
 def run_batch(raw_data_dir, scan_filter=None, skip_existing=False,
-              show_sides=False):
+              show_sides=False, fresh_summary=False):
     if scan_filter:
         dirs = [os.path.join(raw_data_dir, scan_filter)]
         if not os.path.isdir(dirs[0]):
@@ -615,8 +617,13 @@ def run_batch(raw_data_dir, scan_filter=None, skip_existing=False,
 
     # [Sep 2026] Ghi kem ten scan. Truoc day dump thang mot danh sach tran,
     # khong the ghep nguoc ve tung cay.
-    with open(os.path.join(raw_data_dir, "lichen_summary.json"), "w") as f:
-        json.dump([{"scan": n, "stats": s} for n, s in all_stats], f, indent=2)
+    # [Sep 2026] Gop thay vi ghi de -- xem pipeline_io.py. Day la file chua so
+    # dia y toan corpus, va chay `--scan X` truoc day rut no ve dung 1 dong.
+    # Luu y khoa dinh danh o day la "scan", khong phai "name" nhu 4 file kia.
+    sm_path = os.path.join(raw_data_dir, "lichen_summary.json")
+    rows = [{"scan": n, "stats": s} for n, s in all_stats]
+    dump_summary(sm_path, merged_results(sm_path, rows, id_key="scan",
+                                         fresh=fresh_summary))
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -631,6 +638,8 @@ def main():
                    help="Chi to upslope/downslope (xanh/cam), khong ve lichen")
     p.add_argument("--raw-data",      default=RAW_DATA_DIR)
     p.add_argument("--skip-existing", action="store_true")
+    p.add_argument("--fresh-summary", action="store_true",
+                   help="Ghi de lichen_summary.json thay vi gop vao ban ghi cu")
     p.add_argument("--end-zone",      type=float, default=None,
                    help=f"Phan tram dau/cuoi truc cay force = bark (default {END_ZONE_FRAC})")
     args = p.parse_args()
@@ -639,7 +648,8 @@ def main():
     run_batch(args.raw_data,
               scan_filter   = args.scan if args.scan else None,
               skip_existing = args.skip_existing,
-              show_sides    = args.show_sides)
+              show_sides    = args.show_sides,
+              fresh_summary = args.fresh_summary)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,8 @@ import open3d as o3d
 from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation
 
+from pipeline_io import dump_summary, merged_results
+
 RAW_DATA_DIR = os.path.join(os.path.dirname(__file__), "Raw_data")
 
 
@@ -477,7 +479,8 @@ def process_scan(scan_dir: str,
 
 # ── Batch ─────────────────────────────────────────────────────────────────────
 
-def run_batch(raw_data_dir, scan_filter=None, skip_existing=False, **kwargs):
+def run_batch(raw_data_dir, scan_filter=None, skip_existing=False,
+              fresh_summary=False, **kwargs):
     if scan_filter:
         dirs = [os.path.join(raw_data_dir, scan_filter)]
         if not os.path.isdir(dirs[0]):
@@ -524,8 +527,11 @@ def run_batch(raw_data_dir, scan_filter=None, skip_existing=False, **kwargs):
 
     print(f"{'='*55}")
     print(f"DONE: {ok_count}/{total - skip_count} OK  ({skip_count} skipped)")
-    with open(os.path.join(raw_data_dir, "trim_summary.json"), "w") as f:
-        json.dump({"results": results}, f, indent=2)
+    # [Sep 2026] Gop thay vi ghi de -- xem pipeline_io.py. Chay `--scan X` truoc
+    # day rut file nay ve dung 1 dong.
+    sm_path = os.path.join(raw_data_dir, "trim_summary.json")
+    dump_summary(sm_path, {"results": merged_results(sm_path, results,
+                                                     fresh=fresh_summary)})
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -552,11 +558,14 @@ def main():
                    help="Bo qua trunk_pointcloud.ply, dung heuristic truc trong luong cu")
     p.add_argument("--raw-data",     default=RAW_DATA_DIR)
     p.add_argument("--skip-existing",action="store_true")
+    p.add_argument("--fresh-summary", action="store_true",
+                   help="Ghi de trim_summary.json thay vi gop vao ban ghi cu")
 
     args = p.parse_args()
     run_batch(args.raw_data,
               scan_filter        = args.scan if args.scan else None,
               skip_existing      = args.skip_existing,
+              fresh_summary      = args.fresh_summary,
               min_frag           = args.min_frag,
               max_radius         = args.max_radius,
               trim_start         = args.trim_start,

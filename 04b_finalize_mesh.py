@@ -28,6 +28,8 @@ from collections import defaultdict
 import numpy as np
 import open3d as o3d
 
+from pipeline_io import dump_summary, merged_results
+
 RAW_DATA_DIR = os.path.join(os.path.dirname(__file__), "Raw_data")
 
 # Fallback neu khong doc duoc IMU
@@ -727,7 +729,8 @@ def process_scan(scan_dir: str,
 # Batch
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_batch(raw_data_dir, scan_filter=None, skip_existing=False, **kwargs):
+def run_batch(raw_data_dir, scan_filter=None, skip_existing=False,
+              fresh_summary=False, **kwargs):
     if scan_filter:
         dirs = [os.path.join(raw_data_dir, scan_filter)]
         if not os.path.isdir(dirs[0]):
@@ -790,11 +793,14 @@ def run_batch(raw_data_dir, scan_filter=None, skip_existing=False, **kwargs):
         for r in failed:
             print(f"  - {r['name']}: {r['msg']}")
 
+    # [Sep 2026] Gop thay vi ghi de -- xem pipeline_io.py. Chay `--scan X` truoc
+    # day rut file nay ve dung 1 dong.
     summary_path = os.path.join(raw_data_dir, "finalize_summary.json")
-    with open(summary_path, "w") as f:
-        json.dump({"smooth_iter": kwargs.get("smooth_iter", 10),
-                   "do_cap":      kwargs.get("do_cap",      True),
-                   "results":     results}, f, indent=2)
+    dump_summary(summary_path,
+                 {"smooth_iter": kwargs.get("smooth_iter", 10),
+                  "do_cap":      kwargs.get("do_cap",      True),
+                  "results":     merged_results(summary_path, results,
+                                                fresh=fresh_summary)})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -839,6 +845,8 @@ Vi du:
                    help="Port cua preview server (default 8050)")
     p.add_argument("--raw-data",      default=RAW_DATA_DIR)
     p.add_argument("--skip-existing", action="store_true")
+    p.add_argument("--fresh-summary", action="store_true",
+                   help="Ghi de finalize_summary.json thay vi gop vao ban ghi cu")
 
     args = p.parse_args()
 
@@ -850,6 +858,7 @@ Vi du:
         args.raw_data,
         scan_filter    = args.scan if args.scan else None,
         skip_existing  = args.skip_existing,
+        fresh_summary  = args.fresh_summary,
         smooth_iter    = 0 if args.no_smooth else args.smooth,
         do_smooth      = not args.no_smooth,
         do_trim_top    = not args.no_trim_top,

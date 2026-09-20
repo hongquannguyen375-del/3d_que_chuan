@@ -22,6 +22,8 @@ import numpy as np
 import open3d as o3d
 from scipy.spatial import cKDTree
 
+from pipeline_io import dump_summary, merged_results
+
 RAW_DATA_DIR = os.path.join(os.path.dirname(__file__), "Raw_data")
 
 
@@ -116,7 +118,7 @@ def process_scan(scan_dir: str, verbose: bool = True,
 # ── Batch ─────────────────────────────────────────────────────────────────────
 
 def run_batch(raw_data_dir, scan_filter=None, skip_existing=False,
-              prefer_poisson=True):
+              prefer_poisson=True, fresh_summary=False):
     if scan_filter:
         dirs = [os.path.join(raw_data_dir, scan_filter)]
         if not os.path.isdir(dirs[0]):
@@ -156,8 +158,14 @@ def run_batch(raw_data_dir, scan_filter=None, skip_existing=False,
     print(f"{'='*55}")
     print(f"DONE: {ok_count}/{total - skip_count} OK  ({skip_count} skipped)")
 
-    with open(os.path.join(raw_data_dir, "recolor_summary.json"), "w") as f:
-        json.dump({"source": "pcd", "results": results}, f, indent=2)
+    # [Sep 2026] Gop thay vi ghi de. Truoc day `--scan X` di qua chinh ham nay
+    # voi danh sach loc con 1 cay roi ghi de file bang dung dong do -- do do
+    # recolor/trim/finalize/lichen_summary.json tren corpus deu bi rut ve 1/46.
+    # Xem pipeline_io.py.
+    sm_path = os.path.join(raw_data_dir, "recolor_summary.json")
+    dump_summary(sm_path, {"source": "pcd",
+                           "results": merged_results(sm_path, results,
+                                                     fresh=fresh_summary)})
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -173,11 +181,14 @@ def main():
     p.add_argument("--no-poisson", action="store_true",
                    help="Dung mesh TSDF nhu truoc thay vi trunk_mesh_poisson.ply "
                         "(xem CLAUDE.md muc 12 item 15)")
+    p.add_argument("--fresh-summary", action="store_true",
+                   help="Ghi de recolor_summary.json thay vi gop vao ban ghi cu")
     args = p.parse_args()
     run_batch(args.raw_data,
               scan_filter    = args.scan if args.scan else None,
               skip_existing  = args.skip_existing,
-              prefer_poisson = not args.no_poisson)
+              prefer_poisson = not args.no_poisson,
+              fresh_summary  = args.fresh_summary)
 
 
 if __name__ == "__main__":
