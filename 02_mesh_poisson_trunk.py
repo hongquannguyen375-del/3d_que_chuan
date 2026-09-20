@@ -83,7 +83,6 @@ from __future__ import annotations
 
 import argparse
 import gc
-import json
 import os
 import time
 
@@ -91,7 +90,17 @@ import numpy as np
 import open3d as o3d
 from scipy.spatial import cKDTree
 
+from pipeline_io import (dump_summary, load_overrides, merged_results,
+                         save_overrides)
+
 RAW_DATA_DIR = r"D:\Backup\Thucdia-18May2026"
+
+# [Sep 2026] Chon depth rieng cho tung cay. Cung khuon voi
+# `per_scan_overrides.json` (04_trim_mesh.py) va `finalize_overrides.json`
+# (04b_finalize_mesh.py) da co tu truoc: {"<ten_scan>": {"depth": 7}}.
+# Ghi bang --set-depth, doc trong run_batch(). Dict long nen sau nay them
+# density_quantile / max_gap_deg khong phai doi dinh dang.
+OVERRIDES_NAME = "poisson_overrides.json"
 
 # [Sep 2026] depth 7 -> 8. Do tren 3 scan x 4 muc mat do x 3 muc depth:
 # depth 8 giam dien tich moi dinh tu 2.94 xuong 0.82 cm2 (o mau 1.7cm -> 0.9cm)
@@ -607,13 +616,18 @@ def process_scan(scan_dir: str,
                  hires_radius: float = HIRES_RADIUS,
                  hires_voxel: float = HIRES_VOXEL,
                  denoise: bool = True,
+                 out_suffix: str = "",
                  verbose: bool = True) -> dict:
     name = os.path.basename(scan_dir.rstrip("/\\"))
     out_dir = os.path.join(scan_dir, "output")
     result = {"name": name, "ok": False, "msg": ""}
 
     pcd_path = os.path.join(out_dir, "trunk_pointcloud.ply")
-    out_path = os.path.join(out_dir, "trunk_mesh_poisson.ply")
+    # out_suffix -> ban dung THU de so sanh bang mat, khong phai hinh hoc da chot.
+    # Buoc 5 (03_recolor_mesh.py) doc "trunk_mesh_poisson.ply" theo ten co dinh
+    # nen file co hau to KHONG chay xuong ha nguon. Do la chu y.
+    _stem = "trunk_mesh_poisson" + (f"_{out_suffix}" if out_suffix else "")
+    out_path = os.path.join(out_dir, _stem + ".ply")
 
     if not os.path.exists(pcd_path):
         result["msg"] = "trunk_pointcloud.ply not found -- chay 05_trunk_isolation.py truoc"
@@ -757,7 +771,10 @@ def run_batch(raw_data_dir: str, scan_filter=None, depth: int = DEFAULT_DEPTH,
               hires: bool = True,
               hires_radius: float = HIRES_RADIUS,
               hires_voxel: float = HIRES_VOXEL,
-              denoise: bool = True) -> None:
+              denoise: bool = True,
+              depth_explicit: bool = False,
+              out_suffix: str = "",
+              fresh_summary: bool = False) -> None:
     scan_dirs = sorted(
         os.path.join(raw_data_dir, d)
         for d in os.listdir(raw_data_dir)
@@ -767,12 +784,30 @@ def run_batch(raw_data_dir: str, scan_filter=None, depth: int = DEFAULT_DEPTH,
     if scan_filter:
         scan_dirs = [d for d in scan_dirs if os.path.basename(d) == scan_filter]
 
+    ov_path = os.path.join(raw_data_dir, OVERRIDES_NAME)
+    per_scan_ov = load_overrides(ov_path, label=" (poisson)")
+
     print(f"Found {len(scan_dirs)} scans with trunk_pointcloud.ply  (depth={depth})")
 
     results = []
     for scan_dir in scan_dirs:
+        name = os.path.basename(scan_dir)
+        # KHAC voi quy uoc o 04_trim/04b_finalize (override luon thang): --depth
+        # go tay thang override, va phai IN RA. Ly do: o hai script kia override
+        # la tinh chinh rieng, con --depth vua la mac dinh toan cuc vua la nut
+        # gat rieng -- im lang bat dong chinh la dang loi ca thay doi nay sinh ra
+        # de chan.
+        scan_depth = depth
+        ov = per_scan_ov.get(name, {})
+        if "depth" in ov:
+            if depth_explicit:
+                print(f"  [{name}] --depth {depth} ghi de lua chon da luu "
+                      f"(depth {ov['depth']}) cho lan chay nay")
+            else:
+                scan_depth = int(ov["depth"])
+                print(f"  [{name}] override: depth {scan_depth}")
         try:
-            results.append(process_scan(scan_dir, depth=depth,
+            results.append(process_scan(scan_dir, depth=scan_depth,
                                         skip_existing=skip_existing,
                                         ring_trim=ring_trim,
                                         max_gap_deg=max_gap_deg,
@@ -783,10 +818,10 @@ def run_batch(raw_data_dir: str, scan_filter=None, depth: int = DEFAULT_DEPTH,
                                         hires=hires,
                                         hires_radius=hires_radius,
                                         hires_voxel=hires_voxel,
-                                        denoise=denoise))
+                                        denoise=denoise,
+                                        out_suffix=out_suffix))
         except Exception as e:
-            results.append({"name": os.path.basename(scan_dir), "ok": False,
-                            "msg": f"loi: {e}"})
+            results.append({"name": name, "ok": False, "msg": f"loi: {e}"})
 
     ok = sum(1 for r in results if r["ok"])
     print(f"\n{'='*60}")
@@ -819,13 +854,23 @@ def run_batch(raw_data_dir: str, scan_filter=None, depth: int = DEFAULT_DEPTH,
                   f"{r.get('rim_cut_top_cm', 0):.0f}cm ngon + "
                   f"{r.get('rim_cut_bot_cm', 0):.0f}cm goc)")
 
-    with open(os.path.join(raw_data_dir, "poisson_summary.json"), "w") as f:
-        json.dump({"depth": depth,
-                   "ring_trim": ring_trim,
-                   "max_gap_deg": max_gap_deg,
-                   "ring_slice_m": ring_slice,
-                   "ring_bridge": ring_bridge,
-                   "results": results}, f, indent=2)
+    # Ban dung THU khong duoc ghi vao so: mesh that tren dia van la ban cu, ghi
+    # vao day se khien summary khai mot depth ma file .ply khong co -- dung loai
+    # bat nhat ma --set-depth sinh ra de chua.
+    if out_suffix:
+        print(f"\n(--out-suffix {out_suffix}: ban dung thu, KHONG ghi "
+              f"poisson_summary.json)")
+        return
+
+    sm_path = os.path.join(raw_data_dir, "poisson_summary.json")
+    dump_summary(sm_path, {"depth": depth,
+                           "depth_overrides": per_scan_ov,
+                           "ring_trim": ring_trim,
+                           "max_gap_deg": max_gap_deg,
+                           "ring_slice_m": ring_slice,
+                           "ring_bridge": ring_bridge,
+                           "results": merged_results(sm_path, results,
+                                                     fresh=fresh_summary)})
 
 
 def main():
@@ -837,9 +882,22 @@ def main():
     g.add_argument("--scan", metavar="NAME")
     g.add_argument("--all", action="store_true")
     p.add_argument("--raw-data", default=RAW_DATA_DIR)
-    p.add_argument("--depth", type=int, default=DEFAULT_DEPTH,
+    p.add_argument("--depth", type=int, default=None,
                    help=f"Poisson octree depth (default {DEFAULT_DEPTH}). Cao hon = "
-                        f"bam nhieu hon va PHONG dien tich; xem docstring")
+                        f"bam nhieu hon va PHONG dien tich; xem docstring. "
+                        f"Go tay thi THANG lua chon da luu trong "
+                        f"{OVERRIDES_NAME} cho lan chay do")
+    p.add_argument("--set-depth", action="store_true",
+                   help=f"Ghi nho --depth cho rieng cay nay vao {OVERRIDES_NAME} "
+                        f"de lan chay --all sau van dung. Can --scan. "
+                        f"Dat lai ve {DEFAULT_DEPTH} thi xoa muc do")
+    p.add_argument("--out-suffix", default="", metavar="TAG",
+                   help="Ghi ra trunk_mesh_poisson_TAG.ply de SO SANH bang mat, "
+                        "khong dung file chinh va khong ghi summary. File nay "
+                        "khong chay xuong buoc 5-8")
+    p.add_argument("--fresh-summary", action="store_true",
+                   help="Ghi de poisson_summary.json thay vi gop vao ban ghi cu "
+                        "(dung khi can don cac dong da cu)")
     p.add_argument("--skip-existing", action="store_true")
     p.add_argument("--max-gap-deg", type=float, default=RING_MAX_GAP_DEG,
                    help=f"Khe goc trong lon nhat cho phep trong mot lat cat "
@@ -876,7 +934,34 @@ def main():
     args = p.parse_args()
     DENSITY_QUANTILE = args.density_quantile
 
-    run_batch(args.raw_data, scan_filter=args.scan, depth=args.depth,
+    depth_explicit = args.depth is not None
+    depth = args.depth if depth_explicit else DEFAULT_DEPTH
+
+    if args.set_depth:
+        if not args.scan:
+            p.error("--set-depth ghi lua chon cho MOT cay, can kem --scan NAME")
+        if not depth_explicit:
+            p.error("--set-depth can biet ghi nho gi, hay kem --depth N")
+        if args.out_suffix:
+            p.error("--set-depth va --out-suffix nguoc nhau: mot ben chot lua "
+                    "chon, mot ben chi dung thu. Chon mot")
+        ov_path = os.path.join(args.raw_data, OVERRIDES_NAME)
+        # depth == mac dinh -> xoa muc, khong de lai rac trong file.
+        vals = {"depth": depth} if depth != DEFAULT_DEPTH else {}
+        save_overrides(ov_path, args.scan, vals)
+        if vals:
+            print(f"Da ghi nho: {args.scan} -> depth {depth}  ({ov_path})")
+        else:
+            print(f"Da xoa lua chon rieng cua {args.scan}; cay nay tro ve "
+                  f"mac dinh depth {DEFAULT_DEPTH}")
+        # Vua ghi xong thi --depth khong con phai la "ghi de" nua, no CHINH la
+        # lua chon da luu -- de depth_explicit=True se in canh bao sai.
+        depth_explicit = False
+
+    run_batch(args.raw_data, scan_filter=args.scan, depth=depth,
+              depth_explicit=depth_explicit,
+              out_suffix=args.out_suffix,
+              fresh_summary=args.fresh_summary,
               skip_existing=args.skip_existing,
               ring_trim=not args.no_ring_trim,
               max_gap_deg=args.max_gap_deg,
