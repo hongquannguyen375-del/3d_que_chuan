@@ -395,7 +395,12 @@ def main() -> None:
             run_step(
                 "2/8", "Dựng point cloud + mesh nhanh (02_pointcloud_and_mesh.py)",
                 args.python, scripts_dir / "02_pointcloud_and_mesh.py",
-                [str(scan_dir), "--no-visualize"], scripts_dir,
+                # --no-mesh: bỏ STEP 2 nội bộ (mesh.ply). Không bước nào từ 3
+                # đến 8 đọc file đó — hình học lấy từ 02_mesh_poisson_trunk.py.
+                # Trên cay_0043 bước đó làm chết cả script bằng MemoryError SAU
+                # KHI pointcloud.ply đã ghi xong, tức mất cả lần chạy vì một
+                # file không ai dùng.
+                [str(scan_dir), "--no-visualize", "--no-mesh"], scripts_dir,
                 expected_outputs=[out_dir / "pointcloud.ply"],
                 resume=args.resume,
             )
