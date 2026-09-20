@@ -23,6 +23,24 @@ import cv2
 import numpy as np
 import open3d as o3d
 
+# Voxel dung cho pointcloud.ply. Dung o CA hai cho: ha mau giua chung va ha
+# mau lan cuoi -- phai bang nhau, neu khac thi ket qua phu thuoc vao viec co
+# ha mau giua chung hay khong.
+PCD_VOXEL = 0.003
+
+# [Sep 2026] Tran so diem duoc phep tich luy truoc khi ha mau giua chung.
+# Truoc day vong lap cong don MOI khung roi moi ha mau MOT lan o cuoi, nen
+# dinh RAM ti le voi do dai scan. Do tren may nay (7.9 GB, thuong con trong
+# 1.6-2.7 GB), voi skip_every=5 va ~100k diem/khung:
+#   cay_0022 1,728 khung ->  23tr diem -> 1.0 GB tich luy, dinh ~2.1 GB
+#   cay_0043 2,324 khung ->  60tr diem -> 2.7 GB tich luy, dinh ~5.4 GB
+#   cay_0006 2,850 khung ->  61tr diem -> 2.7 GB tich luy, dinh ~5.5 GB
+#   cay_0007 3,711 khung ->  75tr diem -> 3.3 GB tich luy, dinh ~6.7 GB  <- CHET that
+# Dinh gap ~2 lan vi voxel_down_sample phai dung bang bam va cap phat dam ket
+# qua moi truoc khi giai phong dam cu. o3d giu 48 byte/diem (xyz + rgb float64).
+# Ha mau khi vuot tran giu dinh RAM gan nhu khong doi theo do dai scan.
+ACCUM_MAX_PTS = 25_000_000
+
 
 # ---------------------------------------------------------------------------
 # Data Loading
@@ -180,6 +198,7 @@ def create_rgbd_pointcloud(
     confidence_threshold: int = 1,
     max_depth: float = 3.0,
     max_width: int = 640,
+    accum_max_pts: int = ACCUM_MAX_PTS,
 ) -> tuple[o3d.geometry.PointCloud, list[np.ndarray]]:
     """Create a combined point cloud with high-resolution RGB colours.
 
@@ -231,6 +250,8 @@ def create_rgbd_pointcloud(
     combined_pcd = o3d.geometry.PointCloud()
     camera_positions = []
     n_corrupt_frames = 0
+    accum_limit = accum_max_pts if accum_max_pts and accum_max_pts > 0 else None
+    n_interim = 0
 
     for i, pose in enumerate(poses):
         if i % skip_every != 0:
@@ -283,6 +304,20 @@ def create_rgbd_pointcloud(
             combined_pcd += pcd
             camera_positions.append(pose["position"])
 
+            # Ha mau giua chung khi dam tich luy vuot tran -- xem ACCUM_MAX_PTS.
+            if accum_limit is not None and len(combined_pcd.points) > accum_limit:
+                _n0 = len(combined_pcd.points)
+                combined_pcd = combined_pcd.voxel_down_sample(voxel_size=PCD_VOXEL)
+                _n1 = len(combined_pcd.points)
+                n_interim += 1
+                # Chong dao: neu ha mau khong giai phong duoc bao nhieu (dam da
+                # gan kich thuoc cuoi cung), nang tran len thay vi ha mau lai
+                # sau moi khung.
+                accum_limit = max(accum_max_pts, int(_n1 * 1.8))
+                print(f"  [ha mau giua chung #{n_interim}] {_n0:,} -> {_n1:,} diem"
+                      f"  (tran ke tiep {accum_limit:,})", flush=True)
+                gc.collect()
+
             del depth, confidence, rgb, depth_up, rgb_work
             del color_o3d, depth_o3d, rgbd, pcd
         except Exception as e:
@@ -299,7 +334,7 @@ def create_rgbd_pointcloud(
         print(f"\nTong so khung bi bo qua vi anh hong: {n_corrupt_frames}")
 
     # Downsample — use a finer voxel to keep more detail
-    combined_pcd = combined_pcd.voxel_down_sample(voxel_size=0.003)
+    combined_pcd = combined_pcd.voxel_down_sample(voxel_size=PCD_VOXEL)
     print(f"\nCombined point cloud: {len(combined_pcd.points)} points")
 
     return combined_pcd, camera_positions
@@ -625,6 +660,18 @@ def main():
                         help="Process every N-th frame for point cloud (default: 5)")
     parser.add_argument("--voxel-size", type=float, default=0.005,
                         help="TSDF voxel size in meters (default: 0.005)")
+    parser.add_argument("--no-mesh", action="store_true",
+                        help="Bo qua STEP 2 (mesh TSDF -> mesh.ply). File do KHONG "
+                             "duoc buoc 3-8 dung den. Buoc nay ton nhieu RAM va da "
+                             "lam chet ca script tren scan dai SAU KHI "
+                             "pointcloud.ply da ghi xong. 07_preview.py va web app "
+                             "3d_scan/ co doc mesh.ply nen mac dinh VAN dung")
+    parser.add_argument("--accum-max-pts", type=int, default=ACCUM_MAX_PTS,
+                        help=f"Ha mau dam tich luy khi vuot so diem nay, de dinh "
+                             f"RAM khong tang theo do dai scan (default "
+                             f"{ACCUM_MAX_PTS:,}). Dat 0 de tat -- hanh vi cu, "
+                             f"tich luy het roi moi ha mau mot lan; scan dai se "
+                             f"chet voi MemoryError")
     parser.add_argument("--max-depth", type=float, default=3.0,
                         help="Max depth in meters (default: 3.0)")
     parser.add_argument("--max-width", type=int, default=640,
@@ -676,12 +723,21 @@ def main():
         skip_every=args.skip_every,
         max_depth=args.max_depth,
         max_width=args.max_width,
+        accum_max_pts=args.accum_max_pts,
     )
     pcd_path = os.path.join(output_dir, "pointcloud.ply")
     o3d.io.write_point_cloud(pcd_path, pcd)
     print(f"Saved point cloud to {pcd_path}")
 
     # --- Mesh ---
+    # mesh.ply KHONG duoc buoc 3-8 dung den (hinh hoc lay tu
+    # 02_mesh_poisson_trunk.py). Tren cay_0043 buoc nay lam chet ca script bang
+    # MemoryError SAU KHI pointcloud.ply da ghi xong -- tuc mat ca lan chay vi
+    # mot file khong ai doc. 07_preview.py va web app 3d_scan/ co doc no nen
+    # mac dinh van dung; run_full_pipeline.py tu truyen --no-mesh.
+    if args.no_mesh:
+        print("\n(--no-mesh: bo qua STEP 2, khong dung mesh.ply)")
+        return
     print("\n" + "=" * 60)
     print("STEP 2: Generating TSDF Mesh")
     print("=" * 60)
