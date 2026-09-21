@@ -324,6 +324,58 @@ def cmd_read(scan, raw_data, min_votes):
           f"({100.0 * (lab == 1).sum() / max((lab >= 0).sum(), 1):.1f}%)")
     np.save(os.path.join(ann, "labels3d.npy"), lab)
     print(f"\n  da luu {os.path.join(ann, 'labels3d.npy')}")
+    _score(sd, pts, lab)
+
+
+def _score(sd, pts, lab):
+    """Cham diem bo do hien tai tren cac diem DA CO NHAN.
+
+    Chi cham tren diem lab >= 0 -- tuc co it nhat mot khung da khoanh nhin
+    thay no. Diem lab == -1 khong khung nao nhin thay, khong biet dung sai,
+    nen khong duoc tinh vao.
+    """
+    import contextlib
+    import importlib.util
+    import io as _io
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location(
+        "det", os.path.join(here, "05_detect_lichen.py"))
+    det = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(det)
+        cols = np.asarray(o3d.io.read_point_cloud(
+            os.path.join(sd, "output", "trunk_pointcloud.ply")).colors)
+        with contextlib.redirect_stdout(_io.StringIO()):
+            auto = det.classify_lichen_local_contrast(pts, cols) == 2
+    except Exception as e:
+        print(f"  (khong cham diem duoc: {e})")
+        return
+
+    m = lab >= 0
+    t = lab[m] == 1
+    a = auto[m]
+    tp = int((a & t).sum()); fp = int((a & ~t).sum())
+    fn = int((~a & t).sum()); tn = int((~a & ~t).sum())
+    prec = tp / max(tp + fp, 1)
+    rec = tp / max(tp + fn, 1)
+
+    print("")
+    print("  " + "=" * 58)
+    print(f"  CHAM DIEM BO DO HIEN TAI tren {int(m.sum()):,} diem co nhan")
+    print("  " + "=" * 58)
+    print(f"    {'':20s} {'anh khoanh DIA Y':>18s} {'anh khoanh VO':>15s}")
+    print(f"    {'may bao dia y':20s} {tp:>18,} {fp:>15,}")
+    print(f"    {'may bao vo':20s} {fn:>18,} {tn:>15,}")
+    print("")
+    print(f"    BO SOT : {fn:,}/{tp + fn:,} dia y that "
+          f"({100.0 * fn / max(tp + fn, 1):.1f}%)")
+    print(f"    NHAM   : {fp:,}/{tp + fp:,} cho may bao la dia y "
+          f"({100.0 * fp / max(tp + fp, 1):.1f}%)")
+    print(f"    do chinh xac {100 * prec:.1f}%   do bao phu {100 * rec:.1f}%   "
+          f"F1 {100 * 2 * prec * rec / max(prec + rec, 1e-9):.1f}%")
+    print("")
+    print(f"    ty le dia y THAT (anh khoanh) : {100.0 * t.mean():.1f}%")
+    print(f"    ty le may dang bao            : {100.0 * a.mean():.1f}%")
 
 
 def main():
