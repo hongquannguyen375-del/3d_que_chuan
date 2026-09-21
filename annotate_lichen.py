@@ -378,6 +378,291 @@ def _score(sd, pts, lab):
     print(f"    ty le may dang bao            : {100.0 * a.mean():.1f}%")
 
 
+# --------------------------------------------------------------------------- #
+#  fit -- chinh bo do bang nhan tay, roi cham tren vung chua dung de chinh
+# --------------------------------------------------------------------------- #
+
+FEATURES = ["L", "a", "b", "sL", "rL", "ra", "rb", "lcL", "lca"]
+# Bo dac trung da KHU ANH SANG: chi gom du sau khi tru trung vi cung huong
+# phap tuyen, va tuong phan so voi lang gieng 3D. Xem _shade_report ve ly do.
+FEATURES_ILLUM = ["rL", "ra", "rb", "lcL", "lca"]
+MIN_OBS = 5           # duoi so khung nay thi mau chua du tin
+
+
+def collect_colors(sd, pts, nrm, step=2, cache=None, verbose=True):
+    """Gop L,a,b cho tung diem tu ANH GOC, chi tinh khung nhin CHINH DIEN.
+
+    Khac voi mau trong trunk_pointcloud.ply: mau do da gop qua moi goc nhin,
+    ke ca goc liec va mat sau, nen tin hieu dia y bi hoa tan. Loc chinh dien
+    dua kha nang tach tu 0.32 len 0.78-0.99 (do tren cay_0004).
+    """
+    if cache and os.path.exists(cache):
+        z = np.load(cache)
+        if len(z["cnt"]) == len(pts):
+            if verbose:
+                print("  dung lai mau da gop: " + cache)
+            return z["mean"], z["std"], z["cnt"]
+
+    K = np.loadtxt(os.path.join(sd, "camera_matrix.csv"), delimiter=",")
+    poses = load_poses(sd)
+    fids = [f for f in sorted(poses)
+            if os.path.exists(os.path.join(sd, "rgb", f + ".jpg"))][::step]
+    n = len(pts)
+    s1 = np.zeros((n, 3)); s2 = np.zeros((n, 3)); cnt = np.zeros(n)
+    used = blur = 0
+    for i, fid in enumerate(fids):
+        img = cv2.imread(os.path.join(sd, "rgb", fid + ".jpg"))
+        if img is None:
+            continue
+        h, w = img.shape[:2]
+        pos, q = poses[fid]
+        vs, u, v = front_visible(pts, nrm, pos, q, K, w, h)
+        if len(vs) < 100:
+            continue
+        uu = u[vs].astype(int); vv = v[vs].astype(int)
+        x0, x1 = uu.min(), uu.max() + 1
+        y0, y1 = vv.min(), vv.max() + 1
+        crop = img[y0:y1, x0:x1]
+        g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        if g.size < 5000 or cv2.Laplacian(g, cv2.CV_64F).var() < MIN_SHARP:
+            blur += 1
+            continue
+        lb = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB).astype(np.float64)
+        pu = uu - x0; pv = vv - y0
+        val = np.c_[lb[pv, pu, 0] * 100.0 / 255.0,
+                    lb[pv, pu, 1] - 128.0,
+                    lb[pv, pu, 2] - 128.0]
+        s1[vs] += val; s2[vs] += val ** 2; cnt[vs] += 1
+        used += 1
+        if verbose and i % 200 == 0:
+            print("   %d/%d" % (step * i, step * len(fids)), flush=True)
+    if verbose:
+        print("  dung %d khung, bo %d khung nhoe" % (used, blur))
+    c = np.maximum(cnt, 1)[:, None]
+    keep = (cnt >= MIN_OBS)[:, None]
+    mean = np.where(keep, s1 / c, np.nan)
+    std = np.where(keep, np.sqrt(np.maximum(s2 / c - (s1 / c) ** 2, 0.0)), np.nan)
+    if cache:
+        np.savez(cache, mean=mean, std=std, cnt=cnt)
+    return mean, std, cnt
+
+
+def _by_normal(val, nrm, n=16):
+    """Tru trung vi cua cac diem CUNG HUONG PHAP TUYEN.
+
+    Anh sang co huong tren mat tru lam mau bien thien theo goc quanh than (mot
+    hinh sin giai thich 95%). Tru theo huong khu duoc no ma khong xoa mang dia
+    y -- vi mang trai tren nhieu do cao khac nhau o cung mot huong. Tru theo
+    DO CAO thi nguoc lai se xoa mat mang: da thu, kha nang tach roi 0.32 -> 0.09.
+    """
+    ang = np.degrees(np.arctan2(nrm[:, 2], nrm[:, 0])) % 360
+    s = np.clip((ang / (360.0 / n)).astype(int), 0, n - 1)
+    out = np.full(len(val), np.nan)
+    for i in range(n):
+        m = (s == i) & ~np.isnan(val)
+        if m.sum() >= 30:
+            out[m] = val[m] - np.median(val[m])
+    return out
+
+
+def _local_contrast(pts, val, k=40):
+    """Gia tri cua diem tru trung vi cua k diem gan nhat trong khong gian 3D."""
+    from scipy.spatial import cKDTree
+    _, nb = cKDTree(pts).query(pts, k=k)
+    out = np.full(len(pts), np.nan)
+    ok = ~np.isnan(val)
+    with np.errstate(invalid="ignore"):
+        med = np.nanmedian(np.where(ok[nb], val[nb], np.nan), axis=1)
+    out[ok] = val[ok] - med[ok]
+    return out
+
+
+def build_features(pts, nrm, mean, std):
+    L, A, B = mean[:, 0], mean[:, 1], mean[:, 2]
+    return {"L": L, "a": A, "b": B, "sL": std[:, 0],
+            "rL": _by_normal(L, nrm), "ra": _by_normal(A, nrm),
+            "rb": _by_normal(B, nrm),
+            "lcL": _local_contrast(pts, L), "lca": _local_contrast(pts, A)}
+
+
+def _logistic(X, y, iters=400, lr=2.0, l2=1e-3):
+    """Hoi quy logistic viet tay, co can bang lop.
+
+    Co tinh de don gian: vai nghin diem nhan tay cua MOT cay khong du de nuoi
+    mot mo hinh lon -- no se hoc thuoc long cay nay.
+    """
+    mu, sd = X.mean(0), X.std(0) + 1e-9
+    Z = np.c_[(X - mu) / sd, np.ones(len(X))]
+    w = np.zeros(Z.shape[1])
+    pos = max(y.mean(), 1e-6)
+    sw = np.where(y, 1.0 / pos, 1.0 / max(1 - pos, 1e-6))
+    sw /= sw.mean()
+    for _ in range(iters):
+        p = 1.0 / (1.0 + np.exp(-Z.dot(w)))
+        w -= lr * (Z.T.dot(sw * (p - y)) / len(Z) + l2 * np.r_[w[:-1], 0.0])
+    return w, mu, sd
+
+
+def _apply(X, w, mu, sd):
+    Z = np.c_[(X - mu) / sd, np.ones(len(X))]
+    return 1.0 / (1.0 + np.exp(-Z.dot(w)))
+
+
+def _best_threshold(score, y):
+    best = (0.0, float(np.nanmedian(score)))
+    for t in np.nanpercentile(score, np.arange(1, 100)):
+        p = score >= t
+        tp = (p & y).sum(); fp = (p & ~y).sum(); fn = (~p & y).sum()
+        f1 = 2.0 * tp / max(2 * tp + fp + fn, 1)
+        if f1 > best[0]:
+            best = (f1, float(t))
+    return best[1], best[0]
+
+
+def _pr(pred, truth, tag):
+    tp = int((pred & truth).sum()); fp = int((pred & ~truth).sum())
+    fn = int((~pred & truth).sum())
+    prec = tp / max(tp + fp, 1); rec = tp / max(tp + fn, 1)
+    f1 = 2 * prec * rec / max(prec + rec, 1e-9)
+    print("    %-16s chinh xac %5.1f%%  bao phu %5.1f%%  F1 %5.1f%%"
+          "   (dung %s nham %s sot %s)"
+          % (tag, 100 * prec, 100 * rec, 100 * f1,
+             format(tp, ","), format(fp, ","), format(fn, ",")))
+    return f1
+
+
+def _current_detector(sd, pts):
+    """Cham diem bo do dang chay, tren cung tap diem."""
+    import contextlib
+    import importlib.util
+    import io as _io
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        spec = importlib.util.spec_from_file_location(
+            "det", os.path.join(here, "05_detect_lichen.py"))
+        det = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(det)
+        cols = np.asarray(o3d.io.read_point_cloud(
+            os.path.join(sd, "output", "trunk_pointcloud.ply")).colors)
+        with contextlib.redirect_stdout(_io.StringIO()):
+            return det.classify_lichen_local_contrast(pts, cols) == 2
+    except Exception as e:
+        print("    (khong cham duoc bo do hien tai: %s)" % e)
+        return None
+
+
+def _shade_report(L, sec, te, y, pred):
+    """Bo do moi co dang bam vao anh sang khong -- cai bay da giet bo do cu.
+
+    Bo do hien tai bam vao mat khuat nang: tuong quan do sang <-> ty le bao la
+    dia y do duoc r = -0.75. Neu bo do moi cung tuong quan manh voi do sang
+    (manh hon chinh su that), no dang hoc "cho sang/toi = dia y" chu khong hoc
+    dia y -- va se sai o cay co huong nang khac.
+    """
+    rows = []
+    print("")
+    print("  %5s %9s %11s %12s %7s" % ("goc", "do sang", "dia y THAT",
+                                       "may MOI bao", "n"))
+    print("  " + "-" * 50)
+    for s in range(N_SECTOR):
+        mm = te & (sec == s)
+        if mm.sum() < 100:
+            continue
+        rows.append((L[mm].mean(), y[mm].mean(), pred[mm].mean()))
+        print("  %5d %9.1f %10.1f%% %11.1f%% %7s"
+              % (int(s * 360 / N_SECTOR), L[mm].mean(), 100 * y[mm].mean(),
+                 100 * pred[mm].mean(), format(int(mm.sum()), ",")))
+    if len(rows) < 4:
+        return
+    r = np.array(rows)
+    c_true = np.corrcoef(r[:, 0], r[:, 1])[0, 1]
+    c_pred = np.corrcoef(r[:, 0], r[:, 2])[0, 1]
+    print("")
+    print("    tuong quan do sang <-> dia y THAT : %+.2f" % c_true)
+    print("    tuong quan do sang <-> may MOI bao: %+.2f" % c_pred)
+    if abs(c_pred) > abs(c_true) + 0.15:
+        print("    ^ may bam vao anh sang manh hon chinh su that."
+              " Bo dac trung 'illum' bam it hon.")
+
+
+def cmd_fit(scan, raw_data, feature_set, step, fresh):
+    """Chinh nguong tren mot nua so o luoi, cham diem tren nua kia.
+
+    Chia theo O LUOI kieu ban co, khong chia ngau nhien theo diem: hai diem
+    canh nhau gan nhu chac chan cung nhan, chia ngau nhien se cho diem cao gia
+    tao vi mo hinh da nhin thay hang xom cua moi diem dem kiem.
+    """
+    sd = os.path.join(raw_data, scan)
+    ann = os.path.join(ANN_ROOT, scan)
+    lab_path = os.path.join(ann, "labels3d.npy")
+    if not os.path.exists(lab_path):
+        sys.exit("Chua co nhan. Chay truoc:\n"
+                 "    python annotate_lichen.py read " + scan)
+    pcd = o3d.io.read_point_cloud(os.path.join(sd, "output", "trunk_pointcloud.ply"))
+    pts = np.asarray(pcd.points)
+    lab = np.load(lab_path)
+    if len(lab) != len(pts):
+        sys.exit("Nhan %s diem nhung model co %s -- trunk_pointcloud.ply da doi"
+                 " sau khi khoanh. Chay lai 'read'."
+                 % (format(len(lab), ","), format(len(pts), ",")))
+    nrm, cell = build_grid(pts)
+    cache = os.path.join(ann, "colors.npz")
+    if fresh and os.path.exists(cache):
+        os.remove(cache)
+    mean, std, cnt = collect_colors(sd, pts, nrm, step=step, cache=cache)
+
+    F = build_features(pts, nrm, mean, std)
+    keys = FEATURES_ILLUM if feature_set == "illum" else FEATURES
+    ok = np.ones(len(pts), bool)
+    for k in FEATURES:
+        ok &= ~np.isnan(F[k])
+    band = cell // N_SECTOR
+    sec = cell % N_SECTOR
+    m = (lab >= 0) & ok
+    y = lab == 1
+    tr = m & (((band + sec) % 2) == 0)
+    te = m & (((band + sec) % 2) == 1)
+    print("")
+    print("  o CHAN, dung de CHINH : %s diem, %.1f%% dia y"
+          % (format(int(tr.sum()), ","), 100 * y[tr].mean()))
+    print("  o LE,   dung de KIEM  : %s diem, %.1f%% dia y"
+          % (format(int(te.sum()), ","), 100 * y[te].mean()))
+    if tr.sum() < 200 or te.sum() < 200:
+        sys.exit("  Qua it diem co nhan de chia doi. Khoanh them khung.")
+
+    X = np.c_[tuple(F[k] for k in keys)]
+    w, mu, sd_ = _logistic(X[tr], y[tr])
+    thr, f1tr = _best_threshold(_apply(X[tr], w, mu, sd_), y[tr])
+    pred = _apply(X, w, mu, sd_) >= thr
+
+    print("")
+    print("  " + "=" * 64)
+    print("  KET QUA tren o LE -- chua he dung de chinh  [%s]" % feature_set)
+    print("  " + "=" * 64)
+    _pr(pred[te], y[te], "bo do MOI")
+    auto = _current_detector(sd, pts)
+    if auto is not None:
+        _pr(auto[te], y[te], "bo do HIEN TAI")
+    print("    (F1 tren chinh o CHAN la %.1f%% -- lech nhieu so voi o LE"
+          " nghia la hoc thuoc)" % (100 * f1tr))
+
+    _shade_report(F["L"], sec, te, y, pred)
+
+    out = os.path.join(ann, "model.json")
+    with open(out, "w") as f:
+        json.dump({"scan": scan, "feature_set": feature_set, "keys": keys,
+                   "w": w.tolist(), "mu": mu.tolist(), "sd": sd_.tolist(),
+                   "threshold": thr}, f, indent=2)
+    print("\n  da luu " + out)
+    print("  CANH BAO: mo hinh nay chinh tren MOT cay, mot huong nang. Truoc"
+          " khi dung cho ca corpus")
+    print("  phai khoanh them vai cay co huong nang khac roi kiem cheo giua"
+          " cac cay.")
+
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -392,9 +677,20 @@ def main():
     b.add_argument("--raw-data", default=RAW_DATA_DIR)
     b.add_argument("--min-votes", type=int, default=2,
                    help="So khung toi thieu cung khoanh mot diem (mac dinh 2)")
+    c = sub.add_parser("fit", help="Chinh bo do theo nhan, kiem tren vung chua dung")
+    c.add_argument("scan")
+    c.add_argument("--raw-data", default=RAW_DATA_DIR)
+    c.add_argument("--features", choices=["illum", "all"], default="illum",
+                   help="illum = chi dac trung da khu anh sang (mac dinh); "
+                        "all = them ca mau tho, F1 cao hon nhung bam vao nang")
+    c.add_argument("--step", type=int, default=2,
+                   help="Gop mau tu moi N khung (mac dinh 2)")
+    c.add_argument("--fresh", action="store_true", help="Gop lai mau, bo cache")
     args = p.parse_args()
     if args.cmd == "pick":
         cmd_pick(args.scan, args.n, args.step, args.raw_data)
+    elif args.cmd == "fit":
+        cmd_fit(args.scan, args.raw_data, args.features, args.step, args.fresh)
     else:
         cmd_read(args.scan, args.raw_data, args.min_votes)
 
