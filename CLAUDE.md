@@ -10,7 +10,7 @@ End-to-end pipeline for detecting and quantifying lichen (*địa y*) on cinnamo
 
 - **Institution:** VinUniversity, Hanoi
 - **Scale:** 500–1000 trees across 2–3 field sites (currently ~90 trees actively processed)
-- **Baseline accuracy claim (original docs):** ~70% on clean samples (HSV adaptive thresholding) — **not independently re-verified**; see §9 for known accuracy limitations found during active troubleshooting.
+- **Accuracy — [MEASURED Sep 21 2026, and the original claim is wrong].** The original docs claimed ~70% on clean samples (HSV adaptive thresholding) and this file has carried it flagged as never independently re-verified. It is now verified against hand labels on `cay_0004_1805` (§12 item 19): the active detector scores **precision 6.3%, recall 0.2%, F1 0.5%** — it finds 10 of 3,271 hand-marked lichen points, and reports 0.7% coverage where the annotator marked 17.9%. **Do not quote the 70% figure anywhere.** A label-fitted replacement measures F1 42.8% on held-out data but is calibrated on one tree and is not in the pipeline. See §9 and §12 items 4, 16, 18, 19.
 
 > ⚠️ **Reconciliation note:** This file merges the original project CLAUDE.md with findings from an extended hands-on debugging session (Aug–Sep 2026). Where the two disagree, the debugging-session findings are marked **[VERIFIED]** because they were confirmed against the actual GitHub repo content and actual runtime behavior on the working machine. Anything only in the original docs and never touched during that session is marked **[UNVERIFIED / other branch]**.
 
@@ -42,6 +42,7 @@ End-to-end pipeline for detecting and quantifying lichen (*địa y*) on cinnamo
 ├── run_full_pipeline.py         # [NEW, added this session] Single-scan orchestrator — see §4
 ├── run_all_raw_data.py          # [VERIFIED] Batch "quick" pipeline (extract→pointcloud→auto_clean); hardcoded author path, needs editing before use
 ├── run_pipeline_all.bat         # [VERIFIED] Batch "full" pipeline (TSDF→recolor→trim→finalize→detect); hardcoded author paths; assumes trunk_pointcloud.ply already exists
+├── annotate_lichen.py           # [NEW, Sep 2026] Hand-label lichen on 2D frames and project onto the model; `pick` exports frames, `read` builds `labels3d.npy` and scores the current detector, `fit` calibrates a replacement and scores it on held-out grid cells — see §12 item 19
 ├── recover_truncated_mp4.py     # [NEW, Sep 2026] Rebuild a playable stream from an rgb.mp4 whose recording was interrupted (no moov atom) — see §11
 ├── check_image_integrity_v2.py  # [NEW] Diagnostic — scans depth/rgb for corrupt files (cv2+PIL)
 ├── check_pointcloud.py          # [NEW] Diagnostic — point count, NaN/Inf, bounding box sanity check
@@ -451,6 +452,23 @@ docker run -p 8000:8000 -e TSDF_VOXEL_SIZE=0.008 lichen-server
    **Corpus result over both patches: 46/46 scans, 91.7% of height kept by the ring trim and 85.9% surviving into the final mesh.** Top-rim raggedness went from median 3.8cm / max 35.5cm / 21 scans over 5cm, to median 0.0cm / max 0.9cm / none over the 1.5cm tolerance. On `cay_0004` the top rim is 21.7cm → 0.4cm. **Two scans are flagged for re-scanning** via `ring_flag` in `poisson_summary.json`, which is keyed on `mesh_kept_frac` (final mesh height ÷ original point-cloud height): `cay_0003_1805` (38%; already known to be a bad capture, vertical sweep 1.04m) and `cay_0025_1805` (63%).
 
    Three caveats worth keeping in view: (a) **interior holes are untouched** — 15 of 46 scans have a mid-trunk boundary loop, largest 56 vertices, identical with and without either patch. A slice can be angularly complete yet locally sparse enough for the density trim to punch through; neither criterion addresses that, and `04b_finalize_mesh.py --fill` is the existing (off-by-default) tool for it. (b) The ring trim changes the point set fed to Poisson, so reconstruction shifts *globally* — holes move between scans rather than only disappearing. Compare corpus-level statistics, never a single scan before/after, and always with the same metric (an earlier "10/46 scans have side holes" figure here used a height-zone classification, not boundary-loop components, and is not comparable to the 15/46 above). (c) The mesh-level lichen shift is **larger than the point-level bias measured beforehand** — `cay_0007` moved 32.2% → 30.6% on a point-level bias budget of ≤0.8pp — because item 16's ≥1-vote transfer amplifies everything 4–6×. That is item 16 showing through, not a fault in the trim, but it means **the trim is not lichen-percentage-neutral in the reported number** even though it is nearly neutral in the data. Measured end-to-end on three scans: `cay_0004` 5,805cm²/2.5% → 5,654/2.0, `cay_0005` 4,478/19.2 → 4,396/18.7, `cay_0007` 12,335/32.2 → 11,816/30.6.
+
+19. **[NEW, Sep 21 2026 — MEASURED] The active lichen detector has an F1 of 0.5%, and a label-fitted replacement reaches 42.8% on held-out data.** This is the first accuracy number in the project's history that was measured rather than inherited. Ground truth: 12 frames of `cay_0004_1805`, chosen by greedy max-coverage so they see 179/192 grid cells (93% of the trunk) rather than clustering in one stretch, hand-painted magenta by the user, projected back onto `trunk_pointcloud.ply` by `annotate_lichen.py read`. **3,271 of 18,284 points that at least one annotated frame saw are lichen — 17.9%. The pipeline reports 0.7%.**
+
+    | on the held-out half | precision | recall | F1 |
+    |---|---|---|---|
+    | `05_detect_lichen.py` as shipped | 6.3% | 0.2% | **0.5%** |
+    | one threshold on aggregated `a*` | 30.1% | 63.7% | 40.9% |
+    | logistic, illumination-normalised (`--features illum`, default) | 36.1% | 52.4% | **42.8%** |
+    | logistic, adding raw colour (`--features all`) | 40.8% | 54.3% | 46.6% |
+
+    **The validation split is by grid cell in a checkerboard, not by point.** Two neighbouring points almost always share a label, so a random point split scores the model on data it effectively saw; the checkerboard keeps whole (height band × angular sector) cells on one side or the other. It is balanced by construction here — 17.6% lichen in the calibration half, 18.2% in the held-out half — and the model scores **42.8% held out against 42.7% on the calibration half**, i.e. there is no overfitting to detect.
+
+    **The new model's features are the ones §12 item 18 identified, not new science:** L/a/b aggregated from the raw frames (not from `trunk_pointcloud.ply`, whose colours are averaged over every viewing angle including grazing and back-facing), counting only points whose surface normal faces the camera, then the angle-residual of each channel plus 3D local contrast. Best single feature is `a*` at AUC 0.708.
+
+    **The trap this could have fallen into, and the check that is now built in.** The current detector fires on the shaded side (brightness vs reported lichen rate, r = −0.75). A model fitted on one tree can learn the same confound in reverse, and would then score well here and fail on a tree lit from another direction. `fit` therefore always prints the per-sector table and both correlations. On this tree the true lichen rate genuinely does correlate with brightness (**r = +0.56**) and the default model matches it (**+0.59**) — it is tracking the lichen, not the light. The `--features all` variant correlates **+0.84**, buying 4 points of F1 by riding the illumination, which is why `illum` is the default despite scoring lower.
+
+    **Two caveats on the ground truth itself.** (a) The annotator can only paint lichen they can *see*, and lichen on the dark side of the trunk is harder to see in a photo — so part of that +0.56 may be annotation bias rather than biology. (b) It is one tree and one sun direction. **Nothing here is usable on the corpus yet**, and none of it touches the shipped pipeline: `05_detect_lichen.py` is unchanged and `model.json` is not read by anything. Next step is labelling several trees with different lighting and cross-checking between them, before deciding whether to replace the detection path.
 
 ---
 
