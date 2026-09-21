@@ -663,6 +663,147 @@ def cmd_fit(scan, raw_data, feature_set, step, fresh):
 
 
 
+# --------------------------------------------------------------------------- #
+#  apply -- to model bang mo hinh da chinh, de nhin bang mat
+# --------------------------------------------------------------------------- #
+
+# Cung bang mau voi 05_detect_lichen.py, de so sanh hai model canh nhau duoc.
+VIZ_UP   = np.array([1.00, 0.50, 0.00])   # dia y phia tren doc  = CAM
+VIZ_DOWN = np.array([1.00, 0.95, 0.00])   # dia y phia duoi doc  = VANG
+END_ZONE_FRAC = 0.05                      # cat 5% moi dau -- mat cat gia tao
+
+
+def predict(scan, raw_data, step=2, verbose=True):
+    """Chay mo hinh trong model.json len TUNG DIEM cua trunk_pointcloud.ply."""
+    sd = os.path.join(raw_data, scan)
+    ann = os.path.join(ANN_ROOT, scan)
+    mp = os.path.join(ann, "model.json")
+    if not os.path.exists(mp):
+        sys.exit("Chua co mo hinh. Chay truoc:\n"
+                 "    python annotate_lichen.py fit " + scan)
+    with open(mp) as f:
+        M = json.load(f)
+    pts = np.asarray(o3d.io.read_point_cloud(
+        os.path.join(sd, "output", "trunk_pointcloud.ply")).points)
+    nrm, cell = build_grid(pts)
+    mean, std, cnt = collect_colors(sd, pts, nrm, step=step,
+                                    cache=os.path.join(ann, "colors.npz"),
+                                    verbose=verbose)
+    F = build_features(pts, nrm, mean, std)
+    X = np.c_[tuple(F[k] for k in M["keys"])]
+    ok = ~np.isnan(X).any(1)
+    p = np.zeros(len(pts))
+    p[ok] = _apply(X[ok], np.array(M["w"]), np.array(M["mu"]), np.array(M["sd"]))
+    return pts, (p >= M["threshold"]) & ok, ok, M
+
+
+def _transfer(pts, lich, verts, k=15, min_frac=0.5):
+    """Chuyen nhan tu diem sang dinh mesh bang DA SO phieu, khong phai 1 phieu.
+
+    Buoc 8 cua pipeline nhan mot dinh la dia y khi CHI CAN 1 trong k diem gan
+    nhat la dia y. Do duoc (CLAUDE.md muc 12 item 16): cach do thoi ty le bao
+    cao len 4-6 lan so voi ty le that trong dam may diem, va con ty le thuan
+    voi do min cua mesh -- cung mot cay doc 2.50% o depth 7 va 4.78% o depth 9.
+    Da so phieu khong co tinh chat do.
+    """
+    from scipy.spatial import cKDTree
+    _, idx = cKDTree(pts).query(verts, k=k, workers=-1)
+    frac = lich[idx].mean(axis=1)
+    return frac >= min_frac, frac
+
+
+def cmd_apply(scan, raw_data, step, out_name):
+    sd = os.path.join(raw_data, scan)
+    out_dir = os.path.join(sd, "output")
+    mesh_path = os.path.join(out_dir, "trunk_mesh_final.ply")
+    if not os.path.exists(mesh_path):
+        sys.exit("Khong thay " + mesh_path)
+
+    pts, lich, ok, M = predict(scan, raw_data, step=step)
+    print("")
+    print("  tren DAM MAY DIEM (khong phu thuoc do min cua mesh)")
+    print("    diem du mau de ket luan : %s / %s"
+          % (format(int(ok.sum()), ","), format(len(pts), ",")))
+    print("    ty le dia y             : %.1f%%" % (100.0 * lich[ok].mean()))
+
+    mesh = o3d.io.read_triangle_mesh(mesh_path)
+    verts = np.asarray(mesh.vertices)
+    tris = np.asarray(mesh.triangles)
+    cols = np.asarray(mesh.vertex_colors)
+    if len(cols) != len(verts):
+        cols = np.full((len(verts), 3), 0.5)
+
+    vl, frac = _transfer(pts, lich, verts)
+    vl_any = frac > 0
+    print("")
+    print("  tren MESH")
+    print("    da so phieu (dung o day) : %.1f%% so dinh" % (100.0 * vl.mean()))
+    print("    >=1 phieu (kieu pipeline): %.1f%% so dinh  <- thoi phong"
+          % (100.0 * vl_any.mean()))
+
+    # huong len doc, dung y het buoc 8
+    trunk_axis = _pca_axis(verts)
+    g_up = _gravity_up(sd)
+    up_perp = g_up - np.dot(g_up, trunk_axis) * trunk_axis
+    n = np.linalg.norm(up_perp)
+    up_perp = np.array([1.0, 0.0, 0.0]) if n < 0.1 else up_perp / n
+
+    fc = verts[tris].mean(axis=1)
+    centroid = verts.mean(axis=0)
+    fup = (fc - centroid) @ up_perp
+    side = np.zeros(len(verts), np.float32)
+    for c in range(3):
+        np.add.at(side, tris[:, c], fup)
+    is_up = side >= 0
+
+    # cat hai dau: mat cat phang khong phai vo cay
+    t = verts @ trunk_axis
+    ez = END_ZONE_FRAC * max(t.max() - t.min(), 0.01)
+    vl = vl & (t >= t.min() + ez) & (t <= t.max() - ez)
+
+    new = cols.copy()
+    new[vl & is_up] = VIZ_UP
+    new[vl & ~is_up] = VIZ_DOWN
+    mesh.vertex_colors = o3d.utility.Vector3dVector(new.clip(0, 1))
+    out = os.path.join(out_dir, out_name)
+    o3d.io.write_triangle_mesh(out, mesh, write_vertex_colors=True)
+
+    nu = int((vl & is_up).sum()); nd = int((vl & ~is_up).sum())
+    print("    tren doc %s dinh / duoi doc %s dinh  (ty le %.2f)"
+          % (format(nu, ","), format(nd, ","), nu / max(nd, 1)))
+    print("")
+    print("  da luu " + out)
+    print("  CAM = dia y phia tren doc, VANG = phia duoi doc, con lai giu mau vo.")
+    print("  File nay KHONG thay trunk_mesh_detected.ply cua pipeline -- de"
+          " canh nhau ma so.")
+
+
+def _pca_axis(v):
+    x = v - v.mean(0)
+    w, V = np.linalg.eigh(np.cov(x.T))
+    a = V[:, np.argmax(w)]
+    return a / np.linalg.norm(a)
+
+
+def _gravity_up(sd):
+    """Huong len, lay tu imu.csv neu co; thieu thi dung +Y cua the gioi.
+
+    ARKit gan truc the gioi theo trong luc, do duoc lech toi da 0.63 do tren
+    ca 49 ban quet (CLAUDE.md muc 6), nen +Y la mac dinh an toan.
+    """
+    p = os.path.join(sd, "imu.csv")
+    if os.path.exists(p):
+        try:
+            a = np.loadtxt(p, delimiter=",", skiprows=1, usecols=(1, 2, 3))
+            g = np.median(a, axis=0)
+            if np.linalg.norm(g) > 1e-6:
+                return -g / np.linalg.norm(g)
+        except Exception:
+            pass
+    return np.array([0.0, 1.0, 0.0])
+
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -686,11 +827,19 @@ def main():
     c.add_argument("--step", type=int, default=2,
                    help="Gop mau tu moi N khung (mac dinh 2)")
     c.add_argument("--fresh", action="store_true", help="Gop lai mau, bo cache")
+    d = sub.add_parser("apply", help="To model bang mo hinh da chinh")
+    d.add_argument("scan")
+    d.add_argument("--raw-data", default=RAW_DATA_DIR)
+    d.add_argument("--step", type=int, default=2)
+    d.add_argument("--out", default="trunk_mesh_detected_MOI.ply",
+                   help="Ten file trong output/ (mac dinh trunk_mesh_detected_MOI.ply)")
     args = p.parse_args()
     if args.cmd == "pick":
         cmd_pick(args.scan, args.n, args.step, args.raw_data)
     elif args.cmd == "fit":
         cmd_fit(args.scan, args.raw_data, args.features, args.step, args.fresh)
+    elif args.cmd == "apply":
+        cmd_apply(args.scan, args.raw_data, args.step, args.out)
     else:
         cmd_read(args.scan, args.raw_data, args.min_votes)
 
