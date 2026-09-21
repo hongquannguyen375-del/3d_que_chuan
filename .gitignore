@@ -37,3 +37,6 @@ raw_data_validation_report.json
 
 # Corpse of the corrupted repository, kept for reference (see CLAUDE.md)
 .git_corrupt_*/
+
+# Anh de khoanh nhan bang tay (annotate_lichen.py) -- du lieu lam viec, khong theo doi
+annotate/
