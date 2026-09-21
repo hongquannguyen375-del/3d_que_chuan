@@ -804,6 +804,103 @@ def _gravity_up(sd):
 
 
 
+# --------------------------------------------------------------------------- #
+#  sun -- do huong nang tung cay, de chon cay khoanh tiep
+# --------------------------------------------------------------------------- #
+
+def sun_azimuth(sd, n_sec=16):
+    """Huong sang nhat quanh than, va hinh sin do khop den dau.
+
+    Anh sang co huong tren mat tru lam do sang bien thien theo goc quanh than
+    theo mot hinh sin. Dinh cua hinh sin la huong nang. R2 cao nghia la anh
+    sang that su co huong ro; R2 thap nghia la troi am hoac cay trong bong ram,
+    va cay do khong dung de kiem tra tinh tong quat theo anh sang.
+
+    Do tren mau da gop trong trunk_pointcloud.ply chu khong gop lai tu anh goc:
+    gop lai tu anh goc mat ~7 phut moi cay, qua cham cho viec CHON. Mau da gop
+    lam nhat bien thien nhung khong doi huong cua no -- kiem lai tren
+    cay_0004_1805 cho 78 do, so voi 90 do do tu anh goc, lech duoi mot cung.
+    """
+    p = os.path.join(sd, "output", "trunk_pointcloud.ply")
+    if not os.path.exists(p):
+        return None
+    pcd = o3d.io.read_point_cloud(p)
+    pts = np.asarray(pcd.points)
+    cols = np.asarray(pcd.colors)
+    if len(pts) < 2000 or len(cols) != len(pts):
+        return None
+
+    y = pts[:, 1]
+    lo, hi = y.min(), y.max()
+    band = np.clip(((y - lo) / ((hi - lo) / N_BAND)).astype(int), 0, N_BAND - 1)
+    cx = np.zeros(N_BAND); cz = np.zeros(N_BAND)
+    for b in range(N_BAND):
+        m = band == b
+        if m.sum() > 20:
+            cx[b], cz[b] = np.median(pts[m, 0]), np.median(pts[m, 2])
+    ang = np.degrees(np.arctan2(pts[:, 2] - cz[band], pts[:, 0] - cx[band])) % 360
+    sec = np.clip((ang / (360.0 / n_sec)).astype(int), 0, n_sec - 1)
+
+    v = cols.mean(axis=1)
+    mu = np.full(n_sec, np.nan)
+    for s in range(n_sec):
+        m = sec == s
+        if m.sum() >= 50:
+            mu[s] = v[m].mean()
+    ok = ~np.isnan(mu)
+    if ok.sum() < 10:
+        return None
+    th = np.radians(np.arange(n_sec) * 360.0 / n_sec)[ok]
+    A = np.c_[np.cos(th), np.sin(th), np.ones(int(ok.sum()))]
+    coef, _, _, _ = np.linalg.lstsq(A, mu[ok], rcond=None)
+    res = mu[ok] - A.dot(coef)
+    var = ((mu[ok] - mu[ok].mean()) ** 2).sum()
+    return {"az": float(np.degrees(np.arctan2(coef[1], coef[0])) % 360),
+            "amp": float(np.hypot(coef[0], coef[1])),
+            "r2": float(1 - (res ** 2).sum() / max(var, 1e-12)),
+            "n": len(pts), "h": float(hi - lo)}
+
+
+def cmd_sun(raw_data, ref):
+    """Bang huong nang ca corpus, sap theo goc -- chon cay cho khac nhau."""
+    scans = sorted(d for d in os.listdir(raw_data)
+                   if d.startswith("cay_")
+                   and os.path.isdir(os.path.join(raw_data, d)))
+    rows = []
+    for s in scans:
+        r = sun_azimuth(os.path.join(raw_data, s))
+        if r:
+            r["scan"] = s
+            rows.append(r)
+    if not rows:
+        sys.exit("Khong ban quet nao co trunk_pointcloud.ply")
+    rows.sort(key=lambda r: r["az"])
+    ref_az = None
+    for r in rows:
+        if r["scan"] == ref:
+            ref_az = r["az"]
+    print("")
+    print("  %-18s %6s %8s %6s %8s %6s %8s"
+          % ("ban quet", "huong", "bien do", "R2", "diem", "cao m", "lech"))
+    print("  " + "-" * 70)
+    for r in rows:
+        if ref_az is None:
+            d = ""
+        else:
+            dd = (r["az"] - ref_az + 180) % 360 - 180
+            d = "%+.0f" % dd
+        print("  %-18s %5.0f %9.3f %6.2f %8s %6.2f %8s"
+              % (r["scan"], r["az"], r["amp"], r["r2"],
+                 format(r["n"], ","), r["h"], d))
+    print("\n  %d ban quet do duoc." % len(rows))
+    if ref_az is not None:
+        print("  'lech' la goc so voi %s (%.0f do)." % (ref, ref_az))
+    print("  Chon cay de khoanh tiep: lech CANG LON cang kiem duoc manh rang mo")
+    print("  hinh bam vao dia y chu khong bam vao nang. Bo qua cay co R2 thap --")
+    print("  anh sang o do khong co huong ro, khong kiem duoc gi.")
+
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -833,6 +930,10 @@ def main():
     d.add_argument("--step", type=int, default=2)
     d.add_argument("--out", default="trunk_mesh_detected_MOI.ply",
                    help="Ten file trong output/ (mac dinh trunk_mesh_detected_MOI.ply)")
+    e = sub.add_parser("sun", help="Do huong nang ca corpus, de chon cay khoanh tiep")
+    e.add_argument("--raw-data", default=RAW_DATA_DIR)
+    e.add_argument("--ref", default="cay_0004_1805",
+                   help="Cay lay lam moc de tinh do lech (mac dinh cay_0004_1805)")
     args = p.parse_args()
     if args.cmd == "pick":
         cmd_pick(args.scan, args.n, args.step, args.raw_data)
@@ -840,6 +941,8 @@ def main():
         cmd_fit(args.scan, args.raw_data, args.features, args.step, args.fresh)
     elif args.cmd == "apply":
         cmd_apply(args.scan, args.raw_data, args.step, args.out)
+    elif args.cmd == "sun":
+        cmd_sun(args.raw_data, args.ref)
     else:
         cmd_read(args.scan, args.raw_data, args.min_votes)
 
