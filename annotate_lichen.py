@@ -673,16 +673,46 @@ VIZ_DOWN = np.array([1.00, 0.95, 0.00])   # dia y phia duoi doc  = VANG
 END_ZONE_FRAC = 0.05                      # cat 5% moi dau -- mat cat gia tao
 
 
-def predict(scan, raw_data, step=2, verbose=True):
-    """Chay mo hinh trong model.json len TUNG DIEM cua trunk_pointcloud.ply."""
+def predict(scan, raw_data, step=2, verbose=True, fit_from=None,
+            feature_set="illum"):
+    """Chay mo hinh len TUNG DIEM cua trunk_pointcloud.ply.
+
+    fit_from = None  -> dung model.json cua chinh cay do (da chinh tren no).
+    fit_from = [...] -> chinh mo hinh MOI tren cac cay duoc ke ten, roi cham
+                        len cay nay. Cay dich bi loai khoi tap chinh du co
+                        duoc ke ten, nen ket qua luon la "mo hinh chua tung
+                        thay cay nay" -- dung thu de nhin bang mat.
+    """
     sd = os.path.join(raw_data, scan)
     ann = os.path.join(ANN_ROOT, scan)
-    mp = os.path.join(ann, "model.json")
-    if not os.path.exists(mp):
-        sys.exit("Chua co mo hinh. Chay truoc:\n"
-                 "    python annotate_lichen.py fit " + scan)
-    with open(mp) as f:
-        M = json.load(f)
+    if fit_from:
+        keys = FEATURES_ILLUM if feature_set == "illum" else FEATURES
+        srcs = [s for s in fit_from if s != scan]
+        if not srcs:
+            sys.exit("Khong con cay nao de chinh sau khi loai " + scan)
+        datas = []
+        for s in srcs:
+            if verbose:
+                print("  chinh tren " + s + " ...")
+            d = _load_scan(s, raw_data, step)
+            if d:
+                datas.append(d)
+        if not datas:
+            sys.exit("Khong cay nao trong danh sach co nhan.")
+        (w, mu, sd_, thr), f1 = _fit_on(datas, keys)
+        M = {"keys": keys, "w": list(w), "mu": list(mu), "sd": list(sd_),
+             "threshold": thr,
+             "fit_from": [d["scan"] for d in datas]}
+        if verbose:
+            print("  mo hinh cheo tu %d cay (F1 tren chinh cac cay do %.1f%%)"
+                  % (len(datas), 100 * f1))
+    else:
+        mp = os.path.join(ann, "model.json")
+        if not os.path.exists(mp):
+            sys.exit("Chua co mo hinh. Chay truoc:\n"
+                     "    python annotate_lichen.py fit " + scan)
+        with open(mp) as f:
+            M = json.load(f)
     pts = np.asarray(o3d.io.read_point_cloud(
         os.path.join(sd, "output", "trunk_pointcloud.ply")).points)
     nrm, cell = build_grid(pts)
@@ -712,19 +742,37 @@ def _transfer(pts, lich, verts, k=15, min_frac=0.5):
     return frac >= min_frac, frac
 
 
-def cmd_apply(scan, raw_data, step, out_name):
+def cmd_apply(scan, raw_data, step, out_name, fit_from=None,
+              feature_set="illum"):
     sd = os.path.join(raw_data, scan)
     out_dir = os.path.join(sd, "output")
     mesh_path = os.path.join(out_dir, "trunk_mesh_final.ply")
     if not os.path.exists(mesh_path):
         sys.exit("Khong thay " + mesh_path)
 
-    pts, lich, ok, M = predict(scan, raw_data, step=step)
+    pts, lich, ok, M = predict(scan, raw_data, step=step, fit_from=fit_from,
+                               feature_set=feature_set)
+    if M.get("fit_from"):
+        print("")
+        print("  MO HINH CHEO -- chinh tren %s, chua tung thay %s"
+              % (", ".join(M["fit_from"]), scan))
     print("")
     print("  tren DAM MAY DIEM (khong phu thuoc do min cua mesh)")
     print("    diem du mau de ket luan : %s / %s"
           % (format(int(ok.sum()), ","), format(len(pts), ",")))
     print("    ty le dia y             : %.1f%%" % (100.0 * lich[ok].mean()))
+
+    lab_path = os.path.join(ANN_ROOT, scan, "labels3d.npy")
+    if os.path.exists(lab_path):
+        lab = np.load(lab_path)
+        if len(lab) == len(pts):
+            m = (lab >= 0) & ok
+            print("    ty le dia y THAT (khoanh): %.1f%%"
+                  % (100.0 * (lab[m] == 1).mean()))
+            _pr(lich[m], lab[m] == 1, "bo do MOI")
+            auto = _current_detector(sd, pts)
+            if auto is not None:
+                _pr(auto[m], lab[m] == 1, "bo do HIEN TAI")
 
     mesh = o3d.io.read_triangle_mesh(mesh_path)
     verts = np.asarray(mesh.vertices)
@@ -1071,8 +1119,14 @@ def main():
     d.add_argument("scan")
     d.add_argument("--raw-data", default=RAW_DATA_DIR)
     d.add_argument("--step", type=int, default=2)
-    d.add_argument("--out", default="trunk_mesh_detected_MOI.ply",
-                   help="Ten file trong output/ (mac dinh trunk_mesh_detected_MOI.ply)")
+    d.add_argument("--out", default=None,
+                   help="Ten file trong output/ (mac dinh trunk_mesh_detected_MOI.ply,"
+                        " hoac _CHEO.ply khi co --fit-from)")
+    d.add_argument("--fit-from", nargs="*", default=None,
+                   help="Chinh mo hinh tren cac cay NAY roi cham len cay dich;"
+                        " bo trong sau co = moi cay da khoanh. Cay dich luon bi"
+                        " loai khoi tap chinh.")
+    d.add_argument("--features", choices=["illum", "all"], default="illum")
     f_ = sub.add_parser("cross", help="Kiem cheo giua cac cay da khoanh")
     f_.add_argument("scans", nargs="*",
                     help="Ten cac cay; bo trong = moi cay da co labels3d.npy")
@@ -1089,7 +1143,14 @@ def main():
     elif args.cmd == "fit":
         cmd_fit(args.scan, args.raw_data, args.features, args.step, args.fresh)
     elif args.cmd == "apply":
-        cmd_apply(args.scan, args.raw_data, args.step, args.out)
+        ff = args.fit_from
+        if ff is not None and len(ff) == 0:
+            ff = sorted(d for d in os.listdir(ANN_ROOT)
+                        if os.path.exists(os.path.join(ANN_ROOT, d,
+                                                       "labels3d.npy")))
+        out = args.out or ("trunk_mesh_detected_CHEO.ply" if ff
+                           else "trunk_mesh_detected_MOI.ply")
+        cmd_apply(args.scan, args.raw_data, args.step, out, ff, args.features)
     elif args.cmd == "sun":
         cmd_sun(args.raw_data, args.ref)
     elif args.cmd == "cross":
