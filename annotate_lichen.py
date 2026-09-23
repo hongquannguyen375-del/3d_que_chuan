@@ -382,10 +382,24 @@ def _score(sd, pts, lab):
 #  fit -- chinh bo do bang nhan tay, roi cham tren vung chua dung de chinh
 # --------------------------------------------------------------------------- #
 
-FEATURES = ["L", "a", "b", "sL", "rL", "ra", "rb", "lcL", "lca"]
-# Bo dac trung da KHU ANH SANG: chi gom du sau khi tru trung vi cung huong
-# phap tuyen, va tuong phan so voi lang gieng 3D. Xem _shade_report ve ly do.
-FEATURES_ILLUM = ["rL", "ra", "rb", "lcL", "lca"]
+FEATURES = ["L", "a", "b", "sL", "rL", "ra", "rb", "lcL", "lca",
+            "nL300", "na300", "nL1000", "na1000"]
+
+# Bo dac trung mac dinh. Chon bang do, khong bang cam tinh -- xem CLAUDE.md
+# muc 12 item 20. Hai diem dang chu y:
+#
+#   1. KHONG co dac trung nao theo DO SANG tho. Bo "rL" ra khoi bo nay lam F1
+#      tren cay la tang tu 37.9% len 41.3%: do sang mang thong tin anh sang
+#      nhieu hon thong tin dia y, va do la dung cai bay da giet bo do cu.
+#      Rieng "ra","rb" (du mau, khong phai do sang) da cho 39.1%, cao hon ca
+#      bo 9 dac trung cu (35.1%).
+#   2. Tuong phan CUNG HUONG PHAP TUYEN o hai be rong khac nhau. Xem
+#      _normal_contrast() ve ly do no khac tuong phan 3D thong thuong.
+#
+# Ca vung quanh bo nay deu do duoc 39-42%, tuc la mot cao nguyen chu khong
+# phai mot dinh nhon -- nen lua chon chinh xac trong vung do la khong quan
+# trong. Dung doi theo cam tinh; do lai bang 'cross' truoc.
+FEATURES_ILLUM = ["ra", "rb", "nL300", "na300", "nL1000", "na1000"]
 MIN_OBS = 5           # duoi so khung nay thi mau chua du tin
 
 
@@ -477,12 +491,48 @@ def _local_contrast(pts, val, k=40):
     return out
 
 
+def _normal_contrast(pts, nrm, val, k=300, dot_min=0.90, chunk=4000):
+    """Tru trung vi cua lan can CUNG HUONG PHAP TUYEN, trong ban kinh lon.
+
+    Tuong phan 3D thong thuong (_local_contrast) so mot diem voi k lang gieng
+    gan nhat bat ke huong. Than cay chi rong 4-12cm, nen o k lon vung lan can
+    VONG QUANH than va tron lan cac mat co do chieu sang khac han nhau -- dung
+    cai bay da giet bo do cu. Loc theo phap tuyen giu lai nhung diem cung mat,
+    gan nhu chi khac ve DO CAO, nen hieu so con lai la dia y chu khong phai
+    nang.
+
+    Do duoc tren 3 cay: them dai luong nay o hai be rong (k=300 va k=1000)
+    dua F1 tren cay CHUA TUNG THAY tu 39.1% len 41.3%.
+
+    Tinh theo tung khuc vi k=1000 tren 56k diem se can ~1.8 GB neu lam mot
+    lan -- may nay chi co 8 GB.
+    """
+    from scipy.spatial import cKDTree
+    tree = cKDTree(pts)
+    out = np.full(len(pts), np.nan)
+    for i in range(0, len(pts), chunk):
+        j = min(i + chunk, len(pts))
+        _, nb = tree.query(pts[i:j], k=min(k, len(pts)), workers=-1)
+        same = np.einsum("nkj,nj->nk", nrm[nb], nrm[i:j]) >= dot_min
+        v = np.where(same, val[nb], np.nan)
+        with np.errstate(invalid="ignore"):
+            med = np.nanmedian(v, axis=1)
+        n_ok = (~np.isnan(v)).sum(axis=1)
+        ok = (n_ok >= 10) & ~np.isnan(val[i:j])
+        out[i:j] = np.where(ok, val[i:j] - med, np.nan)
+    return out
+
+
 def build_features(pts, nrm, mean, std):
     L, A, B = mean[:, 0], mean[:, 1], mean[:, 2]
-    return {"L": L, "a": A, "b": B, "sL": std[:, 0],
-            "rL": _by_normal(L, nrm), "ra": _by_normal(A, nrm),
-            "rb": _by_normal(B, nrm),
-            "lcL": _local_contrast(pts, L), "lca": _local_contrast(pts, A)}
+    F = {"L": L, "a": A, "b": B, "sL": std[:, 0],
+         "rL": _by_normal(L, nrm), "ra": _by_normal(A, nrm),
+         "rb": _by_normal(B, nrm),
+         "lcL": _local_contrast(pts, L), "lca": _local_contrast(pts, A)}
+    for k in (300, 1000):
+        F["nL%d" % k] = _normal_contrast(pts, nrm, L, k=k)
+        F["na%d" % k] = _normal_contrast(pts, nrm, A, k=k)
+    return F
 
 
 def _logistic(X, y, iters=400, lr=2.0, l2=1e-3):
