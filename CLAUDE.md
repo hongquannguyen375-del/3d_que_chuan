@@ -10,7 +10,7 @@ End-to-end pipeline for detecting and quantifying lichen (*địa y*) on cinnamo
 
 - **Institution:** VinUniversity, Hanoi
 - **Scale:** 500–1000 trees across 2–3 field sites (currently ~90 trees actively processed)
-- **Accuracy — [MEASURED Sep 21 2026, and the original claim is wrong].** The original docs claimed ~70% on clean samples (HSV adaptive thresholding) and this file has carried it flagged as never independently re-verified. It is now verified against hand labels on `cay_0004_1805` (§12 item 19): the active detector scores **precision 6.3%, recall 0.2%, F1 0.5%** — it finds 10 of 3,271 hand-marked lichen points, and reports 0.7% coverage where the annotator marked 17.9%. **Do not quote the 70% figure anywhere.** A label-fitted replacement measures F1 42.8% on held-out data but is calibrated on one tree and is not in the pipeline. See §9 and §12 items 4, 16, 18, 19.
+- **Accuracy — [MEASURED Sep 21 2026, and the original claim is wrong].** The original docs claimed ~70% on clean samples (HSV adaptive thresholding) and this file has carried it flagged as never independently re-verified. It is now verified against hand labels on `cay_0004_1805` (§12 item 19): the active detector scores **precision 6.3%, recall 0.2%, F1 0.5%** — it finds 10 of 3,271 hand-marked lichen points, and reports 0.7% coverage where the annotator marked 17.9%. **Do not quote the 70% figure anywhere.** A label-fitted replacement measures **F1 41.3% on trees it has never seen** (three trees, leave-one-out — §12 item 20) against the shipped detector's 9.5% on the same test, but it is not in the pipeline. See §9 and §12 items 4, 16, 18, 19, 20.
 
 > ⚠️ **Reconciliation note:** This file merges the original project CLAUDE.md with findings from an extended hands-on debugging session (Aug–Sep 2026). Where the two disagree, the debugging-session findings are marked **[VERIFIED]** because they were confirmed against the actual GitHub repo content and actual runtime behavior on the working machine. Anything only in the original docs and never touched during that session is marked **[UNVERIFIED / other branch]**.
 
@@ -42,7 +42,7 @@ End-to-end pipeline for detecting and quantifying lichen (*địa y*) on cinnamo
 ├── run_full_pipeline.py         # [NEW, added this session] Single-scan orchestrator — see §4
 ├── run_all_raw_data.py          # [VERIFIED] Batch "quick" pipeline (extract→pointcloud→auto_clean); hardcoded author path, needs editing before use
 ├── run_pipeline_all.bat         # [VERIFIED] Batch "full" pipeline (TSDF→recolor→trim→finalize→detect); hardcoded author paths; assumes trunk_pointcloud.ply already exists
-├── annotate_lichen.py           # [NEW, Sep 2026] Hand-label lichen on 2D frames and project onto the model; `pick` exports frames, `read` builds `labels3d.npy` and scores the current detector, `fit` calibrates a replacement and scores it on held-out grid cells — see §12 item 19
+├── annotate_lichen.py           # [NEW, Sep 2026] Hand-label lichen on 2D frames and project onto the model. `pick` exports frames chosen for max trunk coverage, `read` builds `labels3d.npy` and scores the current detector, `fit` calibrates a replacement and scores it on held-out grid cells, `cross` runs leave-one-tree-out across every labelled tree, `apply` paints `trunk_mesh_detected_CHEO.ply` from a model fitted on OTHER trees, `sun` measures each scan's illumination direction to choose what to label next — see §12 items 19 and 20
 ├── recover_truncated_mp4.py     # [NEW, Sep 2026] Rebuild a playable stream from an rgb.mp4 whose recording was interrupted (no moov atom) — see §11
 ├── check_image_integrity_v2.py  # [NEW] Diagnostic — scans depth/rgb for corrupt files (cv2+PIL)
 ├── check_pointcloud.py          # [NEW] Diagnostic — point count, NaN/Inf, bounding box sanity check
@@ -469,6 +469,42 @@ docker run -p 8000:8000 -e TSDF_VOXEL_SIZE=0.008 lichen-server
     **The trap this could have fallen into, and the check that is now built in.** The current detector fires on the shaded side (brightness vs reported lichen rate, r = −0.75). A model fitted on one tree can learn the same confound in reverse, and would then score well here and fail on a tree lit from another direction. `fit` therefore always prints the per-sector table and both correlations. On this tree the true lichen rate genuinely does correlate with brightness (**r = +0.56**) and the default model matches it (**+0.59**) — it is tracking the lichen, not the light. The `--features all` variant correlates **+0.84**, buying 4 points of F1 by riding the illumination, which is why `illum` is the default despite scoring lower.
 
     **Two caveats on the ground truth itself.** (a) The annotator can only paint lichen they can *see*, and lichen on the dark side of the trunk is harder to see in a photo — so part of that +0.56 may be annotation bias rather than biology. (b) It is one tree and one sun direction. **Nothing here is usable on the corpus yet**, and none of it touches the shipped pipeline: `05_detect_lichen.py` is unchanged and `model.json` is not read by anything. Next step is labelling several trees with different lighting and cross-checking between them, before deciding whether to replace the detection path.
+
+20. **[NEW, Sep 23 2026 — MEASURED ACROSS THREE TREES] The label-fitted detector transfers to a tree it has never seen, at F1 41.3% against the shipped detector's 9.5% — and the single biggest gain came from *removing* features, not adding them.** Item 19 left the open question of whether a model calibrated on one tree was learning lichen or learning that tree. Two more trees were hand-labelled to answer it, chosen by `annotate_lichen.py sun` for maximally different illumination direction:
+
+    | scan | sun azimuth | labelled points | lichen |
+    |---|---|---|---|
+    | `cay_0004_1805` | 78° | 18,275 | 17.9% |
+    | `cay_0007_1805` | 38° | 44,407 | 26.7% |
+    | `cay_0036_1805` | 270° | 21,045 | 15.4% |
+
+    **Leave-one-tree-out — every number is on a tree the model never saw** (`annotate_lichen.py cross`):
+
+    | held-out tree | precision | recall | F1 (final) | F1 (item 19 features) | shipped detector |
+    |---|---|---|---|---|---|
+    | `cay_0004` | 31.2% | 65.8% | **42.3%** | 38.1% | 0.6% |
+    | `cay_0007` | 44.9% | 58.1% | **50.6%** | 39.5% | 10.5% |
+    | `cay_0036` | 20.7% | 60.5% | **30.8%** | 27.8% | 17.4% |
+    | mean | | | **41.3%** | 35.1% | 9.5% |
+
+    **The model does not ride the illumination.** On every held-out tree its correlation with sector brightness is *lower* than the truth's: +0.22 vs +0.55, +0.57 vs +0.90, +0.43 vs +0.79. Compare the shipped detector at r = −0.75.
+
+    **Three feature families were tried; two failed, and the failures are the more useful result.**
+    - **Geometric roughness — no signal whatsoever.** Local-PCA surface variation and plane-fit residual at k=20 and k=60, plus radial deviation from the local cylinder: **AUC 0.478–0.525** across three trees, and adding them moved mean F1 by **0.0 points**. The intuition that a lichen crust reads as a flatter surface than ridged bark is **not supported by this geometry** — plausibly because the point cloud is a 2.7–5.6cm-thick shell (§12 item 15) whose own noise exceeds bark relief. Not shipped.
+    - **Image texture — real but redundant, and expensive.** Local standard deviation of L at 7/15/31-pixel windows (≈2/4/9mm on the trunk), divided by local brightness so it measures relative contrast rather than brightness. **AUC 0.54–0.60**, with the sign saying lichen is the *flatter* surface — so the hypothesis that failed in the geometry does hold in the image. But once normal-aware contrast is present it adds **nothing** (41.3% either way), and collecting it costs a **second full pass over every frame** (~7 min/scan). Not shipped. **Recorded here so nobody pays for that pass again.**
+    - **What worked was mostly a removal.** `ra`,`rb` alone — the two chroma angle-residuals, no lightness anywhere — score **39.1%**, already above the item-19 nine-feature set's 35.1%. Putting `rL` back **drops it to 37.9%**. Lightness carries more information about the sun than about lichen; this is the §12 item 18 trap again, subtler than the shipped detector's version but the same mechanism.
+
+    **The one genuine addition is `_normal_contrast()`:** local contrast computed only over neighbours whose surface normal points the same way (dot ≥ 0.90), at k=300 and k=1000. Ordinary 3D local contrast at large k **wraps around a 4–12cm trunk** and compares faces under completely different light. Filtering by normal keeps the comparison inside one face, so neighbours differ mainly in *height*. This takes 39.1% → 41.3%. It is chunked (4,000 points at a time) because k=1000 over 56k points would otherwise need ~1.8 GB on an 8 GB machine.
+
+    **Final set: `FEATURES_ILLUM = ["ra", "rb", "nL300", "na300", "nL1000", "na1000"]`.**
+
+    **Selection bias, stated plainly:** about twenty feature sets were scored on the same three trees, so 41.3% is optimistically biased. What makes it credible is that **the neighbourhood is a plateau, not a spike** — `ra` alone + normal-aware 41.6%, +`lcL` 41.2%, k=300 only 40.7%, k=1000 only 40.1%, `ra`,`rb` only 39.1%. The only sharp drop is adding `rL` (37.9%). **Choosing precisely within that plateau does not matter; excluding lightness does.**
+
+    **Two findings that cut against simply labelling more trees.** (a) Going from **one** training tree to **two** bought nothing at the item-19 feature set: mean F1 on an unseen tree was 35.7% with one training tree (six ordered pairs) and 35.1% with two. The gain since then came from features, not data. (b) `cay_0036` barely moves under any configuration (27.8 → 30.8%) and has the worst precision (20.7%); it is also the weakest capture — **389 of 895 frames rejected as blurry**, 80% grid coverage — so its ceiling may be the data, not the model.
+
+    **The ground truth itself remains suspect in one specific way.** On all three trees the *hand-labelled* lichen rate correlates strongly with sector brightness: **+0.55, +0.90, +0.79**. Either lichen genuinely favours the lit side, or the annotator can only paint what they can see and the shaded side is under-labelled. **Nothing in the current data separates these two readings**, and if it is the second, every figure in this item is biased. Resolving it needs labels acquired some other way — a physical inspection of one tree, or frames from a capture under overcast light.
+
+    **Still nothing in the pipeline has changed.** `05_detect_lichen.py` is untouched; `annotate_lichen.py apply` writes `trunk_mesh_detected_CHEO.ply` beside the pipeline's own output for visual comparison, and nothing reads it. Point-level coverage from the cross-fitted model reads 34.7% on `cay_0007` (hand-labelled 26.7%) and 44.2% on `cay_0036` (15.4%) — **the model over-detects, by 1.3× and 2.9×**, which is what precision 45% / 21% implies.
 
 ---
 
