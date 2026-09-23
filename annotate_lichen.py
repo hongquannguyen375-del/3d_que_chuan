@@ -901,6 +901,149 @@ def cmd_sun(raw_data, ref):
 
 
 
+# --------------------------------------------------------------------------- #
+#  cross -- kiem cheo giua cac cay: chinh tren cay nay, cham tren cay khac
+# --------------------------------------------------------------------------- #
+
+def _load_scan(scan, raw_data, step=2):
+    """Doc mot cay da co nhan: dac trung, nhan, huong nang."""
+    sd = os.path.join(raw_data, scan)
+    ann = os.path.join(ANN_ROOT, scan)
+    lab_path = os.path.join(ann, "labels3d.npy")
+    if not os.path.exists(lab_path):
+        return None
+    pts = np.asarray(o3d.io.read_point_cloud(
+        os.path.join(sd, "output", "trunk_pointcloud.ply")).points)
+    lab = np.load(lab_path)
+    if len(lab) != len(pts):
+        print("  bo qua %s: nhan %s diem, model %s diem"
+              % (scan, format(len(lab), ","), format(len(pts), ",")))
+        return None
+    nrm, cell = build_grid(pts)
+    mean, std, cnt = collect_colors(sd, pts, nrm, step=step,
+                                    cache=os.path.join(ann, "colors.npz"),
+                                    verbose=True)
+    F = build_features(pts, nrm, mean, std)
+    ok = np.ones(len(pts), bool)
+    for k in FEATURES:
+        ok &= ~np.isnan(F[k])
+    m = (lab >= 0) & ok
+    sa = sun_azimuth(sd)
+    return {"scan": scan, "F": F, "m": m, "y": lab == 1,
+            "L": F["L"], "sec": cell % N_SECTOR,
+            "az": (sa or {}).get("az", float("nan"))}
+
+
+def _fit_on(datas, keys):
+    X = np.concatenate([np.c_[tuple(d["F"][k][d["m"]] for k in keys)]
+                        for d in datas])
+    y = np.concatenate([d["y"][d["m"]] for d in datas])
+    w, mu, sd = _logistic(X, y)
+    thr, f1 = _best_threshold(_apply(X, w, mu, sd), y)
+    return (w, mu, sd, thr), f1
+
+
+def _test_on(model, d, keys):
+    w, mu, sd, thr = model
+    X = np.c_[tuple(d["F"][k][d["m"]] for k in keys)]
+    p = _apply(X, w, mu, sd) >= thr
+    t = d["y"][d["m"]]
+    tp = int((p & t).sum()); fp = int((p & ~t).sum()); fn = int((~p & t).sum())
+    prec = tp / max(tp + fp, 1); rec = tp / max(tp + fn, 1)
+    return (2 * prec * rec / max(prec + rec, 1e-9), prec, rec, p)
+
+
+def cmd_cross(scans, raw_data, feature_set, step):
+    """Chinh tren mot tap cay, cham tren cay CHUA HE THAY.
+
+    Day la phep thu that su. Cham tren chinh cay da dung de chinh chi cho biet
+    mo hinh khop du lieu den dau, khong cho biet no co dung duoc cho cay tiep
+    theo khong -- ma do moi la thu ca corpus can.
+    """
+    keys = FEATURES_ILLUM if feature_set == "illum" else FEATURES
+    if not scans:
+        scans = sorted(d for d in os.listdir(ANN_ROOT)
+                       if os.path.exists(os.path.join(ANN_ROOT, d, "labels3d.npy")))
+    datas = []
+    for s in scans:
+        print("  doc %s ..." % s)
+        d = _load_scan(s, raw_data, step)
+        if d:
+            datas.append(d)
+    if len(datas) < 2:
+        sys.exit("Can it nhat 2 cay da khoanh. Moi co: %d" % len(datas))
+
+    print("")
+    print("  CAC CAY DA KHOANH")
+    print("  %-18s %8s %9s %8s" % ("cay", "huong", "diem nhan", "dia y"))
+    print("  " + "-" * 48)
+    for d in datas:
+        print("  %-18s %7.0f %9s %7.1f%%"
+              % (d["scan"], d["az"], format(int(d["m"].sum()), ","),
+                 100 * d["y"][d["m"]].mean()))
+
+    print("")
+    print("  " + "=" * 68)
+    print("  BANG CHEO -- hang = chinh tren cay nay, cot = cham tren cay kia")
+    print("  " + "=" * 68)
+    hdr = "  %-18s" % "chinh \\ cham"
+    for d in datas:
+        hdr += " %10s" % d["scan"].replace("cay_", "").replace("_1805", "")
+    print(hdr)
+    print("  " + "-" * (18 + 11 * len(datas)))
+    for a in datas:
+        model, _ = _fit_on([a], keys)
+        row = "  %-18s" % a["scan"].replace("_1805", "")
+        for b in datas:
+            f1, _, _, _ = _test_on(model, b, keys)
+            mark = "*" if a is b else " "
+            row += " %9.1f%s" % (100 * f1, mark)
+        print(row)
+    print("  (* = cham tren chinh cay da dung de chinh -- khong phai phep thu)")
+
+    print("")
+    print("  " + "=" * 68)
+    print("  BO MOT CAY RA -- chinh tren tat ca cay con lai, cham tren cay do")
+    print("  " + "=" * 68)
+    print("  %-18s %9s %9s %9s %11s"
+          % ("cay bi bo ra", "chinh xac", "bao phu", "F1", "bo do cu"))
+    print("  " + "-" * 62)
+    f1s = []
+    for b in datas:
+        rest = [d for d in datas if d is not b]
+        model, _ = _fit_on(rest, keys)
+        f1, prec, rec, pred = _test_on(model, b, keys)
+        f1s.append(f1)
+        old_s = "  -"
+        auto = _current_detector_pts(b, raw_data)
+        if auto is not None:
+            t = b["y"][b["m"]]; a = auto[b["m"]]
+            tp = int((a & t).sum()); fp = int((a & ~t).sum()); fn = int((~a & t).sum())
+            p2 = tp / max(tp + fp, 1); r2 = tp / max(tp + fn, 1)
+            old_s = "%9.1f%%" % (100 * 2 * p2 * r2 / max(p2 + r2, 1e-9))
+        print("  %-18s %8.1f%% %8.1f%% %8.1f%% %11s"
+              % (b["scan"].replace("_1805", ""), 100 * prec, 100 * rec,
+                 100 * f1, old_s))
+        _shade_report(b["L"], b["sec"], b["m"], b["y"], _expand(pred, b["m"]))
+    print("")
+    print("  F1 trung binh khi gap cay chua tung thay: %.1f%%"
+          % (100 * float(np.mean(f1s))))
+
+
+def _expand(pred_on_masked, m):
+    out = np.zeros(len(m), bool)
+    out[m] = pred_on_masked
+    return out
+
+
+def _current_detector_pts(d, raw_data):
+    sd = os.path.join(raw_data, d["scan"])
+    pts = np.asarray(o3d.io.read_point_cloud(
+        os.path.join(sd, "output", "trunk_pointcloud.ply")).points)
+    return _current_detector(sd, pts)
+
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -930,6 +1073,12 @@ def main():
     d.add_argument("--step", type=int, default=2)
     d.add_argument("--out", default="trunk_mesh_detected_MOI.ply",
                    help="Ten file trong output/ (mac dinh trunk_mesh_detected_MOI.ply)")
+    f_ = sub.add_parser("cross", help="Kiem cheo giua cac cay da khoanh")
+    f_.add_argument("scans", nargs="*",
+                    help="Ten cac cay; bo trong = moi cay da co labels3d.npy")
+    f_.add_argument("--raw-data", default=RAW_DATA_DIR)
+    f_.add_argument("--features", choices=["illum", "all"], default="illum")
+    f_.add_argument("--step", type=int, default=2)
     e = sub.add_parser("sun", help="Do huong nang ca corpus, de chon cay khoanh tiep")
     e.add_argument("--raw-data", default=RAW_DATA_DIR)
     e.add_argument("--ref", default="cay_0004_1805",
@@ -943,6 +1092,8 @@ def main():
         cmd_apply(args.scan, args.raw_data, args.step, args.out)
     elif args.cmd == "sun":
         cmd_sun(args.raw_data, args.ref)
+    elif args.cmd == "cross":
+        cmd_cross(args.scans, args.raw_data, args.features, args.step)
     else:
         cmd_read(args.scan, args.raw_data, args.min_votes)
 
