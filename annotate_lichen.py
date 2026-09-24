@@ -457,6 +457,11 @@ def collect_colors(sd, pts, nrm, step=2, cache=None, verbose=True):
     mean = np.where(keep, s1 / c, np.nan)
     std = np.where(keep, np.sqrt(np.maximum(s2 / c - (s1 / c) ** 2, 0.0)), np.nan)
     if cache:
+        # Cay chua bao gio qua 'pick' thi chua co thu muc nay. Truoc khi sua,
+        # do mot cay chua to lam ca 645 khung roi moi sap o dong nay.
+        d = os.path.dirname(cache)
+        if d:
+            os.makedirs(d, exist_ok=True)
         np.savez(cache, mean=mean, std=std, cnt=cnt)
     return mean, std, cnt
 
