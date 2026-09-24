@@ -1265,6 +1265,7 @@ def _current_detector_pts(d, raw_data):
 
 
 def main():
+    global MIN_SHARP
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1273,6 +1274,11 @@ def main():
     a.add_argument("-n", type=int, default=12, help="So khung (mac dinh 12)")
     a.add_argument("--step", type=int, default=5, help="Xet moi N khung (mac dinh 5)")
     a.add_argument("--raw-data", default=RAW_DATA_DIR)
+    a.add_argument("--min-sharp", type=float, default=MIN_SHARP,
+                   help="San do net (mac dinh %g). Nang len cho ban quay bi "
+                        "rung: khung nhoe xoa mat ranh gioi mang, nguoi to se "
+                        "to thieu -- do duoc tren cay_0036_1805, khung to nhoe "
+                        "gap 3 lan hai cay kia." % MIN_SHARP)
     b = sub.add_parser("read", help="Doc phan da khoanh, chieu len model")
     b.add_argument("scan")
     b.add_argument("--raw-data", default=RAW_DATA_DIR)
@@ -1315,6 +1321,7 @@ def main():
                    help="Cay lay lam moc de tinh do lech (mac dinh cay_0004_1805)")
     args = p.parse_args()
     if args.cmd == "pick":
+        MIN_SHARP = args.min_sharp
         cmd_pick(args.scan, args.n, args.step, args.raw_data)
     elif args.cmd == "fit":
         cmd_fit(args.scan, args.raw_data, args.features, args.step, args.fresh)

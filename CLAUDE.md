@@ -565,6 +565,22 @@ docker run -p 8000:8000 -e TSDF_VOXEL_SIZE=0.008 lichen-server
 
     **Two things are needed and neither is more of the same.** (a) **Settle whether the anti-correlation is real.** n = 3 gives a 1-in-6 chance of a fully inverted ranking by luck; the 7-tree evaluation sample (§ below) makes it decidable. (b) **Find a route to the level that does not go through the same threshold.** Options not yet tried: calibrating predicted→true coverage as a separate regression once ≥10 trees are labelled; estimating coverage from the score distribution's shape rather than from a count above a threshold; or raising precision (currently 31–45%), since at a fixed ~40% selected fraction the reported total is dominated by false positives whose rate has nothing to do with lichen.
 
+    **[Sep 24 2026] Estimating the total from the *shape* of the score distribution instead of counting above a threshold — four methods, all failed.** Scored by leave-one-tree-out on the three labelled trees:
+
+    | method | r with truth | mean abs error |
+    |---|---|---|
+    | raw count above threshold | −0.86 | 19.2 pp |
+    | adjusted count, `(q−FPR)/(TPR−FPR)` | −0.10 | 16.1 pp |
+    | mixture fit to the score CDF | −0.42 | **10.4 pp** |
+    | EM prior adjustment (Saerens et al.), raw | *degenerate* | 80.0 pp |
+    | EM after isotonic calibration | −0.01 | 13.3 pp |
+
+    **None reaches a positive correlation.** Three details worth keeping: (a) the adjusted count removes most of the anti-correlation (−0.86 → −0.10), confirming the inversion is largely an FPR artefact of the fixed-fraction threshold rather than something intrinsic; (b) raw EM **saturates at exactly 100.0% on all three trees**, so the +0.80 correlation it appears to score is computed on identical values and is meaningless — the posteriors are badly miscalibrated, and isotonic calibration fixes the saturation but not the correlation; (c) CDF matching is closest in absolute terms and gets two of three trees roughly right (17.9→14.6, 26.7→22.0) but misses the third by 23 pp, **and its fit residual is *lowest* on exactly that tree** (residual-vs-error correlation −0.59). It fails silently, which is the worst property an estimator can have.
+
+    **The tree all five methods miss is the blurriest capture, and that raises a doubt about the label rather than the detector.** Every method reads `cay_0036` at 38–45% against a hand label of 15.4%. Its annotated frames measure **mean Laplacian sharpness 94** against 243 and 364 on the other two, and across the whole scan its median frame sharpness is **67 with only 10 frames above 200**, versus `cay_0007`'s median 188 with 331 frames above 200. **The obvious explanation — blur washing out colour and creating false contrast — was tested and disproved:** re-aggregating colour using only frames above 150 (2.5× stricter) barely moves the reading, 44.2% → 42.8%. That leaves the possibility that the *label* under-counts because the annotator could not see lichen boundaries in blurry frames. **This is not resolved, and it matters**, because a label that is biased low on blurry captures would corrupt the very measurement the 7-tree sample exists to make.
+
+    **Mitigation applied to the evaluation sample:** `pick` gained `--min-sharp`. Three of the seven exported trees came out in `cay_0036`'s blur band (`cay_0040` 102, `cay_0051` 106, `cay_0041` 119) and were re-exported at `--min-sharp 120`, raising mean sharpness to 140 / 187 / 181 and the worst frame from 67–88 to 120–131, at the cost of grid coverage (56–58% → 41–49%). **That trade is deliberate: low coverage makes the estimate noisier, blurry frames make it biased, and noise averages out while bias does not.** Frames are still chosen by max-coverage within the sharp pool, so they stay spread over the trunk.
+
     **Evaluation sample already exported** (`annotate/`, 6 frames each, 42 frames total): `cay_0040`(62°), `cay_0024`(104°), `cay_0051`(115°), `cay_0041`(141°), `cay_0022`(238°), `cay_0035`(270°), `cay_0014`(316°). Chosen by sorting the 45 remaining scans by sun azimuth and taking every 6.4th — **not hand-picked, and weak captures deliberately not excluded** (`cay_0022` has R² 0.79 and a 1.79m sweep from an interrupted recording), because dropping bad scans would make the measured accuracy better than the truth. Only `cay_0003_1805` is excluded, as it will not be in the final results either way.
 
 ---
