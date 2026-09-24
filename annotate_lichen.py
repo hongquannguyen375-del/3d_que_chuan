@@ -729,7 +729,7 @@ END_ZONE_FRAC = 0.05                      # cat 5% moi dau -- mat cat gia tao
 
 
 def predict(scan, raw_data, step=2, verbose=True, fit_from=None,
-            feature_set="illum"):
+            feature_set="illum", model=None):
     """Chay mo hinh len TUNG DIEM cua trunk_pointcloud.ply.
 
     fit_from = None  -> dung model.json cua chinh cay do (da chinh tren no).
@@ -740,7 +740,9 @@ def predict(scan, raw_data, step=2, verbose=True, fit_from=None,
     """
     sd = os.path.join(raw_data, scan)
     ann = os.path.join(ANN_ROOT, scan)
-    if fit_from:
+    if model is not None:
+        M = model
+    elif fit_from:
         keys = FEATURES_ILLUM if feature_set == "illum" else FEATURES
         srcs = [s for s in fit_from if s != scan]
         if not srcs:
@@ -798,7 +800,7 @@ def _transfer(pts, lich, verts, k=15, min_frac=0.5):
 
 
 def cmd_apply(scan, raw_data, step, out_name, fit_from=None,
-              feature_set="illum"):
+              feature_set="illum", model=None, quiet=False, stats=None):
     sd = os.path.join(raw_data, scan)
     out_dir = os.path.join(sd, "output")
     mesh_path = os.path.join(out_dir, "trunk_mesh_final.ply")
@@ -806,16 +808,20 @@ def cmd_apply(scan, raw_data, step, out_name, fit_from=None,
         sys.exit("Khong thay " + mesh_path)
 
     pts, lich, ok, M = predict(scan, raw_data, step=step, fit_from=fit_from,
-                               feature_set=feature_set)
-    if M.get("fit_from"):
+                               feature_set=feature_set, model=model)
+    if M.get("fit_from") and not quiet:
         print("")
         print("  MO HINH CHEO -- chinh tren %s, chua tung thay %s"
               % (", ".join(M["fit_from"]), scan))
-    print("")
-    print("  tren DAM MAY DIEM (khong phu thuoc do min cua mesh)")
-    print("    diem du mau de ket luan : %s / %s"
+    if quiet:
+        _P = lambda *a, **k: None
+    else:
+        _P = print
+    _P("")
+    _P("  tren DAM MAY DIEM (khong phu thuoc do min cua mesh)")
+    _P("    diem du mau de ket luan : %s / %s"
           % (format(int(ok.sum()), ","), format(len(pts), ",")))
-    print("    ty le dia y             : %.1f%%" % (100.0 * lich[ok].mean()))
+    _P("    ty le dia y             : %.1f%%" % (100.0 * lich[ok].mean()))
 
     lab_path = os.path.join(ANN_ROOT, scan, "labels3d.npy")
     if os.path.exists(lab_path):
@@ -838,10 +844,10 @@ def cmd_apply(scan, raw_data, step, out_name, fit_from=None,
 
     vl, frac = _transfer(pts, lich, verts)
     vl_any = frac > 0
-    print("")
-    print("  tren MESH")
-    print("    da so phieu (dung o day) : %.1f%% so dinh" % (100.0 * vl.mean()))
-    print("    >=1 phieu (kieu pipeline): %.1f%% so dinh  <- thoi phong"
+    _P("")
+    _P("  tren MESH")
+    _P("    da so phieu (dung o day) : %.1f%% so dinh" % (100.0 * vl.mean()))
+    _P("    >=1 phieu (kieu pipeline): %.1f%% so dinh  <- thoi phong"
           % (100.0 * vl_any.mean()))
 
     # huong len doc, dung y het buoc 8
@@ -872,13 +878,124 @@ def cmd_apply(scan, raw_data, step, out_name, fit_from=None,
     o3d.io.write_triangle_mesh(out, mesh, write_vertex_colors=True)
 
     nu = int((vl & is_up).sum()); nd = int((vl & ~is_up).sum())
-    print("    tren doc %s dinh / duoi doc %s dinh  (ty le %.2f)"
+    if stats is not None:
+        tri = verts[tris]
+        area = 0.5 * np.linalg.norm(
+            np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1)
+        f_lich = vl[tris].mean(axis=1) >= 0.5
+        stats.update({
+            "scan": scan,
+            "n_pts": int(len(pts)),
+            "n_pts_used": int(ok.sum()),
+            "pct_points": round(100.0 * float(lich[ok].mean()), 2),
+            "pct_mesh": round(100.0 * float(vl.mean()), 2),
+            "total_cm2": round(float(area.sum()) * 10000.0, 1),
+            "lichen_cm2": round(float(area[f_lich].sum()) * 10000.0, 1),
+            "n_up": nu, "n_down": nd,
+            "fit_from": M.get("fit_from"),
+        })
+    _P("    tren doc %s dinh / duoi doc %s dinh  (ty le %.2f)"
           % (format(nu, ","), format(nd, ","), nu / max(nd, 1)))
-    print("")
-    print("  da luu " + out)
-    print("  CAM = dia y phia tren doc, VANG = phia duoi doc, con lai giu mau vo.")
-    print("  File nay KHONG thay trunk_mesh_detected.ply cua pipeline -- de"
+    _P("")
+    _P("  da luu " + out)
+    _P("  CAM = dia y phia tren doc, VANG = phia duoi doc, con lai giu mau vo.")
+    _P("  File nay KHONG thay trunk_mesh_detected.ply cua pipeline -- de"
           " canh nhau ma so.")
+
+
+
+def cmd_apply_all(raw_data, step, out_name, feature_set, skip_existing,
+                  fresh_summary):
+    """Chay bo do len TOAN BO corpus, ghi bang ty le dia y tung cay.
+
+    Mo hinh duoc chinh MOT LAN tren cac cay da khoanh, roi dung lai cho moi
+    cay -- tru cay nao chinh no co nhan, cay do duoc chinh lai voi chinh no bi
+    loai ra, de con so cua no van la "cay chua tung thay".
+    """
+    import time
+    from pipeline_io import dump_summary, merged_results
+
+    keys = FEATURES_ILLUM if feature_set == "illum" else FEATURES
+    labelled = sorted(d for d in os.listdir(ANN_ROOT)
+                      if os.path.exists(os.path.join(ANN_ROOT, d,
+                                                     "labels3d.npy")))
+    if not labelled:
+        sys.exit("Chua cay nao co nhan. Chay 'read' truoc.")
+    print("  chinh mo hinh tren %d cay da khoanh: %s"
+          % (len(labelled), ", ".join(labelled)))
+    datas = []
+    for s in labelled:
+        d = _load_scan(s, raw_data, step)
+        if d:
+            datas.append(d)
+    if not datas:
+        sys.exit("Khong doc duoc cay nao co nhan.")
+
+    def build_model(exclude=None):
+        use = [d for d in datas if d["scan"] != exclude]
+        if not use:
+            return None
+        (w, mu, sd_, thr), f1 = _fit_on(use, keys)
+        return {"keys": keys, "w": list(w), "mu": list(mu), "sd": list(sd_),
+                "threshold": thr, "fit_from": [d["scan"] for d in use]}
+
+    full = build_model()
+    holdout = {d["scan"]: build_model(exclude=d["scan"]) for d in datas}
+
+    scans = sorted(d for d in os.listdir(raw_data)
+                   if d.startswith("cay_")
+                   and os.path.exists(os.path.join(raw_data, d, "output",
+                                                   "trunk_mesh_final.ply")))
+    print("  %d cay co trunk_mesh_final.ply\n" % len(scans))
+
+    rows, fails = [], []
+    t_all = time.time()
+    for i, s in enumerate(scans, 1):
+        out_p = os.path.join(raw_data, s, "output", out_name)
+        if skip_existing and os.path.exists(out_p):
+            print("  [%d/%d] %s  -- da co, bo qua" % (i, len(scans), s))
+            continue
+        t0 = time.time()
+        st = {}
+        try:
+            cmd_apply(s, raw_data, step, out_name,
+                      model=holdout.get(s, full), quiet=True, stats=st)
+        except Exception as e:
+            print("  [%d/%d] %s  -- LOI: %s" % (i, len(scans), s, e))
+            fails.append((s, str(e)))
+            continue
+        st["seconds"] = round(time.time() - t0, 1)
+        rows.append(st)
+        print("  [%d/%d] %-18s diem %5.1f%%   mesh %5.1f%%   %8s cm2  [%.0fs]"
+              % (i, len(scans), s, st["pct_points"], st["pct_mesh"],
+                 format(st["lichen_cm2"], ","), st["seconds"]))
+
+    print("\n  " + "=" * 74)
+    print("  %-18s %8s %8s %11s %11s %7s" %
+          ("cay", "diem %", "mesh %", "dia y cm2", "tong cm2", "tren/duoi"))
+    print("  " + "-" * 74)
+    for r in sorted(rows, key=lambda r: -r["pct_points"]):
+        print("  %-18s %7.1f%% %7.1f%% %11s %11s %7.2f"
+              % (r["scan"], r["pct_points"], r["pct_mesh"],
+                 format(r["lichen_cm2"], ","), format(r["total_cm2"], ","),
+                 r["n_up"] / max(r["n_down"], 1)))
+    if rows:
+        p = np.array([r["pct_points"] for r in rows])
+        print("  " + "-" * 74)
+        print("  %-18s %7.1f%% (trung vi)   thap nhat %.1f%%   cao nhat %.1f%%"
+              % ("%d cay" % len(rows), float(np.median(p)), p.min(), p.max()))
+    if fails:
+        print("\n  %d cay LOI:" % len(fails))
+        for s, e in fails:
+            print("    %s: %s" % (s, e))
+
+    path = os.path.join(raw_data, "lichen_moi_summary.json")
+    dump_summary(path, merged_results(path, rows, id_key="scan",
+                                      fresh=fresh_summary))
+    print("\n  da luu %s" % path)
+    print("  Cot 'diem %%' khong phu thuoc do min cua mesh -- dung cot do khi so")
+    print("  giua cac cay. Cot 'mesh %%' va 'cm2' phu thuoc do min (CLAUDE.md")
+    print("  muc 12 item 16). Tong %.0f phut." % ((time.time() - t_all) / 60))
 
 
 def _pca_axis(v):
@@ -1171,7 +1288,7 @@ def main():
                    help="Gop mau tu moi N khung (mac dinh 2)")
     c.add_argument("--fresh", action="store_true", help="Gop lai mau, bo cache")
     d = sub.add_parser("apply", help="To model bang mo hinh da chinh")
-    d.add_argument("scan")
+    d.add_argument("scan", nargs="?", help="Bo trong khi dung --all")
     d.add_argument("--raw-data", default=RAW_DATA_DIR)
     d.add_argument("--step", type=int, default=2)
     d.add_argument("--out", default=None,
@@ -1182,6 +1299,10 @@ def main():
                         " bo trong sau co = moi cay da khoanh. Cay dich luon bi"
                         " loai khoi tap chinh.")
     d.add_argument("--features", choices=["illum", "all"], default="illum")
+    d.add_argument("--all", action="store_true",
+                   help="Chay het corpus, ghi lichen_moi_summary.json")
+    d.add_argument("--skip-existing", action="store_true")
+    d.add_argument("--fresh-summary", action="store_true")
     f_ = sub.add_parser("cross", help="Kiem cheo giua cac cay da khoanh")
     f_.add_argument("scans", nargs="*",
                     help="Ten cac cay; bo trong = moi cay da co labels3d.npy")
@@ -1198,6 +1319,12 @@ def main():
     elif args.cmd == "fit":
         cmd_fit(args.scan, args.raw_data, args.features, args.step, args.fresh)
     elif args.cmd == "apply":
+        if args.all:
+            cmd_apply_all(args.raw_data, args.step,
+                          args.out or "trunk_mesh_detected_CHEO.ply",
+                          args.features, args.skip_existing,
+                          args.fresh_summary)
+            return
         ff = args.fit_from
         if ff is not None and len(ff) == 0:
             ff = sorted(d for d in os.listdir(ANN_ROOT)
