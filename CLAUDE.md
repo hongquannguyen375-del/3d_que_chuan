@@ -502,7 +502,28 @@ docker run -p 8000:8000 -e TSDF_VOXEL_SIZE=0.008 lichen-server
 
     **Two findings that cut against simply labelling more trees.** (a) Going from **one** training tree to **two** bought nothing at the item-19 feature set: mean F1 on an unseen tree was 35.7% with one training tree (six ordered pairs) and 35.1% with two. The gain since then came from features, not data. (b) `cay_0036` barely moves under any configuration (27.8 → 30.8%) and has the worst precision (20.7%); it is also the weakest capture — **389 of 895 frames rejected as blurry**, 80% grid coverage — so its ceiling may be the data, not the model.
 
-    **The ground truth itself remains suspect in one specific way.** On all three trees the *hand-labelled* lichen rate correlates strongly with sector brightness: **+0.55, +0.90, +0.79**. Either lichen genuinely favours the lit side, or the annotator can only paint what they can see and the shaded side is under-labelled. **Nothing in the current data separates these two readings**, and if it is the second, every figure in this item is biased. Resolving it needs labels acquired some other way — a physical inspection of one tree, or frames from a capture under overcast light.
+    **The brightness correlation in the labels is neither annotation bias nor biology — it is [SELECTION]. [RESOLVED Sep 24 2026 by the user, from field practice.]** On all three trees the *hand-labelled* lichen rate correlates strongly with sector brightness: **+0.55, +0.90, +0.79**. This entry previously offered two readings — real biology, or the annotator under-painting the shaded side. **The user supplied a third, and it is the right one: when choosing which tree to film, the operator mostly picks trees that visibly have more lichen on the sunlit side.** The correlation is therefore built into the sample before any photograph is taken.
+
+    That has two consequences, and they point in opposite directions.
+
+    **(a) Good for the detector — and measured.** Annotation bias is no longer the leading explanation, so the labels are not presumed to be systematically missing shaded-side lichen. More usefully, the leave-one-out prediction was scored separately on the lit and shaded halves of each trunk (lit half = the angular sectors whose mean L is above the trunk's own median):
+
+    | scan | half | precision | true lichen | **lift** | F1 |
+    |---|---|---|---|---|---|
+    | `cay_0004` | lit | 36.7% | 21.2% | **1.73** | 47.0% |
+    | `cay_0004` | shaded | 25.5% | 14.5% | **1.76** | 36.8% |
+    | `cay_0007` | lit | 55.8% | 34.5% | **1.62** | 57.3% |
+    | `cay_0007` | shaded | 29.3% | 16.9% | **1.73** | 38.4% |
+    | `cay_0036` | lit | 26.7% | 19.8% | **1.35** | 37.7% |
+    | `cay_0036` | shaded | 12.5% | 10.2% | **1.23** | 20.1% |
+
+    F1 does fall on the shaded half of every tree — but **lift (precision ÷ base rate) is identical: 1.57 lit, 1.57 shaded.** The detector discriminates exactly as well on the dark side; F1 drops only because there is genuinely less lichen there to find, and precision tracks prevalence. **Read lift, not F1, when comparing regions with different base rates** — the raw F1 column alone would have supported a conclusion the data does not.
+
+    **(b) Bad for the science, and this is the serious half.** If trees are chosen *because* their sunlit side carries lichen, then **this corpus cannot be used to ask which side lichen prefers** — the answer was fixed by the sampling. That is a second, completely independent problem on top of §12 item 13 (which says the upslope/downslope split measures trunk lean, not terrain aspect). Item 13 says the quantity is mislabelled; this says **the sample is selected on the outcome**. Both must be resolved before any orientation statistic is published, and no re-run of `06_slope_analysis.py` touches either.
+
+    **It also sharpens why lightness is excluded from `FEATURES_ILLUM`.** A model that used brightness would score well on this corpus by learning the *selection protocol*, then fail on any tree chosen some other way — for instance a monitoring re-scan, or a randomly sampled tree. The exclusion was justified above on measured F1; under selection bias it is also the only choice that survives a change of sampling.
+
+    **What would actually answer the orientation question:** a subset of trees chosen **without looking at lichen at all** — random, or every n-th tree on a transect. Until such a subset exists, the corpus supports "how much lichen is on this tree" but not "which side lichen favours".
 
     **Still nothing in the pipeline has changed.** `05_detect_lichen.py` is untouched; `annotate_lichen.py apply` writes `trunk_mesh_detected_CHEO.ply` beside the pipeline's own output for visual comparison, and nothing reads it. Point-level coverage from the cross-fitted model reads 34.7% on `cay_0007` (hand-labelled 26.7%) and 44.2% on `cay_0036` (15.4%) — **the model over-detects, by 1.3× and 2.9×**, which is what precision 45% / 21% implies.
 
