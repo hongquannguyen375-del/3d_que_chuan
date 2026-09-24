@@ -10,7 +10,7 @@ End-to-end pipeline for detecting and quantifying lichen (*địa y*) on cinnamo
 
 - **Institution:** VinUniversity, Hanoi
 - **Scale:** 500–1000 trees across 2–3 field sites (currently ~90 trees actively processed)
-- **Accuracy — [MEASURED Sep 21 2026, and the original claim is wrong].** The original docs claimed ~70% on clean samples (HSV adaptive thresholding) and this file has carried it flagged as never independently re-verified. It is now verified against hand labels on `cay_0004_1805` (§12 item 19): the active detector scores **precision 6.3%, recall 0.2%, F1 0.5%** — it finds 10 of 3,271 hand-marked lichen points, and reports 0.7% coverage where the annotator marked 17.9%. **Do not quote the 70% figure anywhere.** A label-fitted replacement measures **F1 41.3% on trees it has never seen** (three trees, leave-one-out — §12 item 20) against the shipped detector's 9.5% on the same test, but it is not in the pipeline. See §9 and §12 items 4, 16, 18, 19, 20.
+- **Accuracy — [MEASURED Sep 21 2026, and the original claim is wrong].** The original docs claimed ~70% on clean samples (HSV adaptive thresholding) and this file has carried it flagged as never independently re-verified. It is now verified against hand labels on `cay_0004_1805` (§12 item 19): the active detector scores **precision 6.3%, recall 0.2%, F1 0.5%** — it finds 10 of 3,271 hand-marked lichen points, and reports 0.7% coverage where the annotator marked 17.9%. **Do not quote the 70% figure anywhere.** A label-fitted replacement measures **F1 41.3% on trees it has never seen** (three trees, leave-one-out — §12 item 20) against the shipped detector's 9.5% on the same test. **It is not in the pipeline and must not be put there yet: that F1 measures *where* lichen is on a trunk, and the same model's *per-tree total* is anti-correlated with the hand labels (§12 item 21).** See §9 and §12 items 4, 16, 18, 19, 20, 21.
 
 > ⚠️ **Reconciliation note:** This file merges the original project CLAUDE.md with findings from an extended hands-on debugging session (Aug–Sep 2026). Where the two disagree, the debugging-session findings are marked **[VERIFIED]** because they were confirmed against the actual GitHub repo content and actual runtime behavior on the working machine. Anything only in the original docs and never touched during that session is marked **[UNVERIFIED / other branch]**.
 
@@ -526,6 +526,46 @@ docker run -p 8000:8000 -e TSDF_VOXEL_SIZE=0.008 lichen-server
     **What would actually answer the orientation question:** a subset of trees chosen **without looking at lichen at all** — random, or every n-th tree on a transect. Until such a subset exists, the corpus supports "how much lichen is on this tree" but not "which side lichen favours".
 
     **Still nothing in the pipeline has changed.** `05_detect_lichen.py` is untouched; `annotate_lichen.py apply` writes `trunk_mesh_detected_CHEO.ply` beside the pipeline's own output for visual comparison, and nothing reads it. Point-level coverage from the cross-fitted model reads 34.7% on `cay_0007` (hand-labelled 26.7%) and 44.2% on `cay_0036` (15.4%) — **the model over-detects, by 1.3× and 2.9×**, which is what precision 45% / 21% implies.
+
+21. **[NEW, Sep 24 2026 — SERIOUS, NOT FIXED] The label-fitted detector locates lichen but cannot measure how much of it there is. Its per-tree total is anti-correlated with the hand labels (r = −0.90 on three trees), and the corpus-wide spread is implausibly narrow.** Found by running `annotate_lichen.py apply --all` over all 49 scans (51 minutes, 49/49 OK) and reading the table:
+
+    ```
+    49 scans   lowest 30.4%   highest 49.1%   median 40.8%   std 4.1
+    ```
+
+    Lichen on real trees cannot be that uniform, and `cay_0003_1805` — the known-broken capture whose whole mesh is 972 cm² — reads **43.6%**, mid-table. Against the three trees that have hand labels:
+
+    | scan | hand-labelled | detector | ratio |
+    |---|---|---|---|
+    | `cay_0007` | **26.7%** | 34.7% | 1.30× |
+    | `cay_0004` | 17.9% | 38.3% | 2.14× |
+    | `cay_0036` | **15.4%** | **44.2%** | 2.87× |
+
+    **The ranking is exactly inverted** — the tree with the most lichen reads lowest. Pearson r = **−0.90** (n = 3, so not conclusive on its own; see below).
+
+    **Mechanism, measured.** The logistic score's mean is nearly identical on every tree (0.457 / 0.456 / 0.468) and the fixed threshold lands at the **56th–64th percentile** of each tree's own score distribution. So the detector selects a near-constant fraction of points regardless of what is on the tree. The cause is in the design: **all six features in `FEATURES_ILLUM` are relative** — residuals from that tree's own per-sector medians, and same-normal local contrast. That is what removes the illumination (§12 item 20), and it also removes the level, by construction.
+
+    **A secondary mechanism was tested and only half-confirmed.** Lichen contaminates the very median used to measure it: the shift between "median over all points" and "median over hand-labelled bark only" scales with lichen fraction (−0.565 / −0.231 / +0.100 for 26.7 / 17.9 / 15.4%). Real, but **not the main cause** — the remaining a\* gap between lichen and the contaminated median is still *largest* on the high-lichen tree (−1.765 vs −0.581), so contamination does not explain the inversion.
+
+    **The obvious fix was tried and disproved before asking the user for more labels.** Adding an absolute (non-recentred) feature back:
+
+    | feature set | F1 | 0007 (26.7%) | 0004 (17.9%) | 0036 (15.4%) | level r |
+    |---|---|---|---|---|---|
+    | current, all relative | **41.3%** | 34.7% | 38.3% | 44.2% | −0.90 |
+    | + absolute `a` | 36.6% | 23.6% | 32.5% | 39.7% | −0.97 |
+    | + absolute `b` | 37.7% | 32.1% | **60.6%** | 27.2% | −0.17 |
+    | + absolute `a`,`b` | 34.9% | 26.6% | 58.2% | 22.6% | −0.21 |
+    | + absolute `L` | 39.1% | 31.3% | 42.3% | 41.2% | −0.95 |
+
+    Absolute features **do** break the constancy (spread widens from 10 points to 33) but **none produces a positive level correlation**, and every one costs 2–7 points of F1. The total goes from uniformly meaningless to variably meaningless — it starts tracking each scan's bark colour and exposure, which is exactly why those features were excluded in the first place.
+
+    **What this says about the method, and it is the important part.** §12 item 20's feature selection was scored on **within-tree F1** — how well the detector localises lichen on a trunk it has never seen. That metric is **blind to the per-tree total**, because F1 is computed per tree against that tree's own labels. The per-tree total is the project's actual deliverable, and it was never in the objective. **F1 41.3% remains valid for what it measures: where lichen is on a trunk.** It says nothing about how much.
+
+    **Consequence: `05_detect_lichen.py` must not be replaced with this model yet.** Doing so would produce a corpus where all 49 trees read ~40% — precise-looking and meaningless, which is the same failure as the retired "~70%" claim, only newer.
+
+    **Two things are needed and neither is more of the same.** (a) **Settle whether the anti-correlation is real.** n = 3 gives a 1-in-6 chance of a fully inverted ranking by luck; the 7-tree evaluation sample (§ below) makes it decidable. (b) **Find a route to the level that does not go through the same threshold.** Options not yet tried: calibrating predicted→true coverage as a separate regression once ≥10 trees are labelled; estimating coverage from the score distribution's shape rather than from a count above a threshold; or raising precision (currently 31–45%), since at a fixed ~40% selected fraction the reported total is dominated by false positives whose rate has nothing to do with lichen.
+
+    **Evaluation sample already exported** (`annotate/`, 6 frames each, 42 frames total): `cay_0040`(62°), `cay_0024`(104°), `cay_0051`(115°), `cay_0041`(141°), `cay_0022`(238°), `cay_0035`(270°), `cay_0014`(316°). Chosen by sorting the 45 remaining scans by sun azimuth and taking every 6.4th — **not hand-picked, and weak captures deliberately not excluded** (`cay_0022` has R² 0.79 and a 1.79m sweep from an interrupted recording), because dropping bad scans would make the measured accuracy better than the truth. Only `cay_0003_1805` is excluded, as it will not be in the final results either way.
 
 ---
 
