@@ -998,6 +998,58 @@ def cmd_apply_all(raw_data, step, out_name, feature_set, skip_existing,
     print("  muc 12 item 16). Tong %.0f phut." % ((time.time() - t_all) / 60))
 
 
+
+MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "lichen_model.json")
+
+
+def cmd_train(raw_data, step, feature_set, out_path):
+    """Chinh mo hinh cuoi cung tren TAT CA cay da khoanh, ghi ra repo.
+
+    Khac 'fit' (mot cay) va 'cross' (kiem cheo): day la ban dung that, nen
+    dung het du lieu. Do chinh xac cua no da do bang 'cross' truoc do -- khong
+    the do lai tren chinh du lieu da chinh.
+    """
+    keys = FEATURES_ILLUM if feature_set == "illum" else FEATURES
+    scans = sorted(d for d in os.listdir(ANN_ROOT)
+                   if os.path.exists(os.path.join(ANN_ROOT, d, "labels3d.npy")))
+    if not scans:
+        sys.exit("Chua cay nao co nhan.")
+    datas = []
+    for s in scans:
+        print("  doc %s ..." % s)
+        d = _load_scan(s, raw_data, step)
+        if d:
+            datas.append(d)
+    if not datas:
+        sys.exit("Khong doc duoc cay nao.")
+
+    (w, mu, sd, thr), f1 = _fit_on(datas, keys)
+    n_pts = int(sum(int(d["m"].sum()) for d in datas))
+    truth = {d["scan"]: round(100.0 * float(d["y"][d["m"]].mean()), 1)
+             for d in datas}
+    obj = {
+        "keys": keys, "w": list(w), "mu": list(mu), "sd": list(sd),
+        "threshold": thr,
+        "trained_on": [d["scan"] for d in datas],
+        "n_trees": len(datas), "n_labelled_points": n_pts,
+        "truth_pct_per_tree": truth,
+        "f1_in_sample_pct": round(100.0 * f1, 1),
+        "NOTE": ("F1 tren cay CHUA TUNG THAY do bang 'cross' la 40.6% (n=10). "
+                 "Con so f1_in_sample_pct o day cao hon vi cham tren chinh du "
+                 "lieu da chinh -- khong dung de bao cao."),
+        "WARNING": ("Mo hinh nay chi tra loi DIA Y NAM DAU tren than cay. "
+                    "TY LE PHAN TRAM tung cay ma no sinh ra KHONG tuong quan "
+                    "voi su that (r = +0.07 tren 10 cay) va con te hon viec "
+                    "doan mot con so co dinh. Xem CLAUDE.md muc 12 item 22."),
+    }
+    with open(out_path, "w") as f:
+        json.dump(obj, f, indent=2)
+    print("\n  chinh tren %d cay, %s diem co nhan" % (len(datas), format(n_pts, ",")))
+    print("  da luu " + out_path)
+
+
+
 def _pca_axis(v):
     x = v - v.mean(0)
     w, V = np.linalg.eigh(np.cov(x.T))
@@ -1315,6 +1367,12 @@ def main():
     f_.add_argument("--raw-data", default=RAW_DATA_DIR)
     f_.add_argument("--features", choices=["illum", "all"], default="illum")
     f_.add_argument("--step", type=int, default=2)
+    t_ = sub.add_parser("train",
+                        help="Chinh tren MOI cay da khoanh, ghi lichen_model.json")
+    t_.add_argument("--raw-data", default=RAW_DATA_DIR)
+    t_.add_argument("--features", choices=["illum", "all"], default="illum")
+    t_.add_argument("--step", type=int, default=2)
+    t_.add_argument("--out", default=None)
     e = sub.add_parser("sun", help="Do huong nang ca corpus, de chon cay khoanh tiep")
     e.add_argument("--raw-data", default=RAW_DATA_DIR)
     e.add_argument("--ref", default="cay_0004_1805",
@@ -1342,6 +1400,9 @@ def main():
         cmd_apply(args.scan, args.raw_data, args.step, out, ff, args.features)
     elif args.cmd == "sun":
         cmd_sun(args.raw_data, args.ref)
+    elif args.cmd == "train":
+        cmd_train(args.raw_data, args.step, args.features,
+                  args.out or MODEL_PATH)
     elif args.cmd == "cross":
         cmd_cross(args.scans, args.raw_data, args.features, args.step)
     else:

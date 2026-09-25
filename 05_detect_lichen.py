@@ -336,6 +336,100 @@ def detect_on_pcd_transfer_to_mesh(pcd_path: str,
     return vert_labels
 
 
+
+# =============================================================================
+#  Bo do theo NHAN TAY  [Sep 2026]
+# =============================================================================
+#
+#  Do tren 10 cay duoc khoanh tay, bo mot cay ra moi lan (CLAUDE.md muc 12
+#  item 22):
+#
+#      F1 tren cay chua tung thay   bo do nay 40.6%   classify_lichen_local
+#                                                     _contrast 13.0%
+#
+#  NHUNG: TY LE PHAN TRAM tung cay ma no sinh ra KHONG tuong quan voi su that
+#  (r = +0.07 tren 10 cay). Doan mot con so co dinh cho moi cay con chinh xac
+#  hon gap doi. Bo do nay tra loi "dia y NAM DAU tren than", khong tra loi
+#  "cay nay co BAO NHIEU dia y". Dung 'lichen_ratio_pct' cho dung viec.
+#
+#  Khac ba cho so voi ham cu:
+#    1. Mau lay tu ANH GOC tung khung, chi tinh diem QUAY MAT ve camera --
+#       khong lay tu mau da gop trong trunk_pointcloud.ply (gop lam mat tin
+#       hieu; loc chinh dien dua kha nang tach tu 0.32 len 0.78-0.99).
+#    2. Dac trung deu la du so voi trung vi cua cac diem CUNG HUONG PHAP
+#       TUYEN, khong co dac trung do sang nao -- do sang mang thong tin ve
+#       nang nhieu hon ve dia y.
+#    3. Chuyen nhan len mesh bang DA SO phieu, khong phai >=1 phieu (muc 12
+#       item 16: >=1 phieu thoi ty le len 1.5-2.5 lan va con phu thuoc do min
+#       cua mesh).
+
+MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "lichen_model.json")
+MODEL_WARNING = ("Ty le phan tram tung cay KHONG dang tin (r = +0.07 so voi "
+                 "nhan tay tren 10 cay). Bo do nay chi dung de biet dia y nam "
+                 "dau tren than. Xem CLAUDE.md muc 12 item 22.")
+
+
+def detect_with_model(scan_dir, verts, k=15, verbose=True):
+    """Chay mo hinh trong lichen_model.json len diem, chuyen len dinh mesh.
+
+    Tra ve (vert_labels, info) hoac (None, ly_do) neu khong chay duoc.
+    """
+    import numpy as _np
+    from scipy.spatial import cKDTree
+
+    if not os.path.exists(MODEL_FILE):
+        return None, "khong thay " + os.path.basename(MODEL_FILE)
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    try:
+        import annotate_lichen as AL
+    except Exception as e:
+        return None, "khong nap duoc annotate_lichen: %s" % e
+
+    with open(MODEL_FILE) as f:
+        M = json.load(f)
+    pcd_path = os.path.join(scan_dir, "output", "trunk_pointcloud.ply")
+    if not os.path.exists(pcd_path):
+        return None, "khong co trunk_pointcloud.ply"
+    pts = _np.asarray(o3d.io.read_point_cloud(pcd_path).points)
+    if len(pts) < 500:
+        return None, "qua it diem (%d)" % len(pts)
+
+    nrm, _cell = AL.build_grid(pts)
+    ann = os.path.join(AL.ANN_ROOT, os.path.basename(scan_dir))
+    cache = os.path.join(ann, "colors.npz")
+    mean, std, cnt = AL.collect_colors(scan_dir, pts, nrm, step=2,
+                                       cache=cache, verbose=verbose)
+    F = AL.build_features(pts, nrm, mean, std)
+    X = _np.c_[tuple(F[key] for key in M["keys"])]
+    ok = ~_np.isnan(X).any(1)
+    if ok.sum() < 200:
+        return None, "chi %d diem du mau" % int(ok.sum())
+    score = _np.zeros(len(pts))
+    score[ok] = AL._apply(X[ok], _np.array(M["w"]), _np.array(M["mu"]),
+                          _np.array(M["sd"]))
+    lich = (score >= M["threshold"]) & ok
+
+    # chuyen len dinh mesh bang DA SO phieu
+    _, idx = cKDTree(pts).query(_np.asarray(verts, dtype=_np.float64),
+                                k=min(k, len(pts)), workers=-1)
+    vert_labels = _np.where(lich[idx].mean(axis=1) >= 0.5, 2, 0).astype(_np.uint8)
+    info = {
+        "detector": "model",
+        "model_trees": M.get("n_trees"),
+        "point_level_pct": round(100.0 * float(lich[ok].mean()), 2),
+        "n_points_used": int(ok.sum()),
+        "n_points_total": int(len(pts)),
+    }
+    if verbose:
+        print("    Bo do NHAN TAY: %.1f%% so diem  (%s/%s diem du mau)"
+              % (info["point_level_pct"], format(int(ok.sum()), ","),
+                 format(len(pts), ",")), flush=True)
+    return vert_labels, info
+
+
 def triangle_areas(verts: np.ndarray, tris: np.ndarray) -> np.ndarray:
     """Dien tich tung tam giac (m2) dung cross product."""
     v0 = verts[tris[:, 0]]
@@ -359,7 +453,8 @@ VIZ_COLORS = {
 
 def process_scan(scan_dir: str,
                  show_sides: bool = False,
-                 verbose: bool = True) -> dict:
+                 verbose: bool = True,
+                 legacy_detector: bool = False) -> dict:
     name    = os.path.basename(scan_dir)
     out_dir = os.path.join(scan_dir, "output")
     result  = {"name": name, "ok": False}
@@ -410,15 +505,28 @@ def process_scan(scan_dir: str,
         up_perp /= norm_up
 
     # ── 4. Classify lichen — uu tien PCD (mau chinh xac), fallback mesh ─────────
-    pcd_path = os.path.join(out_dir, "trunk_pointcloud.ply")
-    if os.path.exists(pcd_path):
+    det_info = {"detector": "legacy"}
+    vert_labels = None
+    if not legacy_detector:
         if verbose:
-            print(f"  Detect tren PCD ({os.path.basename(pcd_path)}) ...", flush=True)
-        vert_labels = detect_on_pcd_transfer_to_mesh(pcd_path, verts)
-    else:
-        if verbose:
-            print(f"  PCD khong co, detect tren mesh colors ...", flush=True)
-        vert_labels = classify_lichen(cols)
+            print("  Detect bang mo hinh nhan tay ...", flush=True)
+        vert_labels, res = detect_with_model(scan_dir, verts, verbose=verbose)
+        if vert_labels is None:
+            if verbose:
+                print("  Mo hinh khong chay duoc (%s) -> dung ham cu" % res,
+                      flush=True)
+        else:
+            det_info = res
+    if vert_labels is None:
+        pcd_path = os.path.join(out_dir, "trunk_pointcloud.ply")
+        if os.path.exists(pcd_path):
+            if verbose:
+                print(f"  Detect tren PCD ({os.path.basename(pcd_path)}) ...", flush=True)
+            vert_labels = detect_on_pcd_transfer_to_mesh(pcd_path, verts)
+        else:
+            if verbose:
+                print(f"  PCD khong co, detect tren mesh colors ...", flush=True)
+            vert_labels = classify_lichen(cols)
 
     # Per-FACE label = majority vote tu 3 vertex
     face_label_votes = np.stack([vert_labels[tris[:,0]],
@@ -493,6 +601,13 @@ def process_scan(scan_dir: str,
         "total_lichen_cm2": round(lichen_total, 1),
         "lichen_ratio_pct": round(lichen_total / max(total_all,1) * 100, 2),
     }
+    stats["detector"] = det_info
+    if det_info.get("detector") == "model":
+        # Ty le tren DAM MAY DIEM: khong phu thuoc do min cua mesh, nen la con
+        # so nen so sanh giua cac cay -- neu buoc phai so. Ca hai deu khong
+        # dang tin o cap do tung cay; xem MODEL_WARNING.
+        stats["overall"]["point_level_pct"] = det_info["point_level_pct"]
+        stats["WARNING"] = MODEL_WARNING
 
     # ── 8. Print results ──────────────────────────────────────────────────────
     if verbose:
@@ -565,6 +680,7 @@ def process_scan(scan_dir: str,
 # ── Batch ─────────────────────────────────────────────────────────────────────
 
 def run_batch(raw_data_dir, scan_filter=None, skip_existing=False,
+              legacy_detector=False,
               show_sides=False, fresh_summary=False):
     if scan_filter:
         dirs = [os.path.join(raw_data_dir, scan_filter)]
@@ -589,7 +705,7 @@ def run_batch(raw_data_dir, scan_filter=None, skip_existing=False,
         if skip_existing and os.path.exists(out_path):
             print(f"[{i+1:3d}/{total}] {name} -- SKIP"); skip_count += 1; continue
         print(f"[{i+1:3d}/{total}] {name}")
-        r = process_scan(scan_dir, show_sides=show_sides, verbose=True)
+        r = process_scan(scan_dir, legacy_detector=legacy_detector, show_sides=show_sides, verbose=True)
         if r["ok"]:
             ok_count += 1
             # [Sep 2026] Luu KEM TEN. Truoc day chi append r["stats"], roi bang
@@ -640,6 +756,10 @@ def main():
     p.add_argument("--skip-existing", action="store_true")
     p.add_argument("--fresh-summary", action="store_true",
                    help="Ghi de lichen_summary.json thay vi gop vao ban ghi cu")
+    p.add_argument("--legacy-detector", action="store_true",
+                   help="Dung ham HSV cu thay vi mo hinh nhan tay "
+                        "(F1 13.0%% so voi 40.6%% tren 10 cay, "
+                        "CLAUDE.md muc 12 item 22)")
     p.add_argument("--end-zone",      type=float, default=None,
                    help=f"Phan tram dau/cuoi truc cay force = bark (default {END_ZONE_FRAC})")
     args = p.parse_args()
@@ -649,7 +769,8 @@ def main():
               scan_filter   = args.scan if args.scan else None,
               skip_existing = args.skip_existing,
               show_sides    = args.show_sides,
-              fresh_summary = args.fresh_summary)
+              fresh_summary = args.fresh_summary,
+              legacy_detector = args.legacy_detector)
 
 
 if __name__ == "__main__":

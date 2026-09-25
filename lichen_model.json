@@ -1,0 +1,65 @@
+{
+  "keys": [
+    "ra",
+    "rb",
+    "nL300",
+    "na300",
+    "nL1000",
+    "na1000"
+  ],
+  "w": [
+    -0.5319731305600169,
+    -0.2016256445345699,
+    -0.4358517114618165,
+    0.4081331732530328,
+    0.7672823211426643,
+    -0.26790629683750744,
+    -0.11878129219628217
+  ],
+  "mu": [
+    -0.10633850903319252,
+    -0.11073830782733984,
+    0.42805453958752826,
+    -0.08435278866913769,
+    0.5369971350647731,
+    -0.08747140184824455
+  ],
+  "sd": [
+    2.8524238577961114,
+    4.513831290820004,
+    5.603187782761839,
+    1.4454806357593486,
+    6.49416206062682,
+    1.6997430709549852
+  ],
+  "threshold": 0.5053093445954043,
+  "trained_on": [
+    "cay_0004_1805",
+    "cay_0007_1805",
+    "cay_0014_1805",
+    "cay_0022_1805",
+    "cay_0024_1805",
+    "cay_0035_1805",
+    "cay_0036_1805",
+    "cay_0040_1805",
+    "cay_0041_1805",
+    "cay_0051_1805"
+  ],
+  "n_trees": 10,
+  "n_labelled_points": 165887,
+  "truth_pct_per_tree": {
+    "cay_0004_1805": 17.9,
+    "cay_0007_1805": 26.7,
+    "cay_0014_1805": 14.8,
+    "cay_0022_1805": 18.9,
+    "cay_0024_1805": 15.2,
+    "cay_0035_1805": 11.4,
+    "cay_0036_1805": 15.4,
+    "cay_0040_1805": 52.9,
+    "cay_0041_1805": 31.3,
+    "cay_0051_1805": 27.7
+  },
+  "f1_in_sample_pct": 44.3,
+  "NOTE": "F1 tren cay CHUA TUNG THAY do bang 'cross' la 40.6% (n=10). Con so f1_in_sample_pct o day cao hon vi cham tren chinh du lieu da chinh -- khong dung de bao cao.",
+  "WARNING": "Mo hinh nay chi tra loi DIA Y NAM DAU tren than cay. TY LE PHAN TRAM tung cay ma no sinh ra KHONG tuong quan voi su that (r = +0.07 tren 10 cay) va con te hon viec doan mot con so co dinh. Xem CLAUDE.md muc 12 item 22."
+}
