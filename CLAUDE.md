@@ -43,6 +43,7 @@ End-to-end pipeline for detecting and quantifying lichen (*địa y*) on cinnamo
 ├── run_all_raw_data.py          # [VERIFIED] Batch "quick" pipeline (extract→pointcloud→auto_clean); hardcoded author path, needs editing before use
 ├── run_pipeline_all.bat         # [VERIFIED] Batch "full" pipeline (TSDF→recolor→trim→finalize→detect); hardcoded author paths; assumes trunk_pointcloud.ply already exists
 ├── annotate_lichen.py           # [NEW, Sep 2026] Hand-label lichen on 2D frames and project onto the model. `pick` exports frames chosen for max trunk coverage, `read` builds `labels3d.npy` and scores the current detector, `fit` calibrates a replacement and scores it on held-out grid cells, `cross` runs leave-one-tree-out across every labelled tree, `apply` paints `trunk_mesh_detected_CHEO.ply` from a model fitted on OTHER trees, `sun` measures each scan's illumination direction to choose what to label next — see §12 items 19 and 20
+├── lichen_model.json            # [NEW, Sep 2026] Logistic weights for step 8's detector, fitted on 10 hand-labelled trees / 165,887 labelled points by `annotate_lichen.py train`. Carries its own provenance and the caveat that its per-tree percentage is not trustworthy — see §12 item 22
 ├── recover_truncated_mp4.py     # [NEW, Sep 2026] Rebuild a playable stream from an rgb.mp4 whose recording was interrupted (no moov atom) — see §11
 ├── check_image_integrity_v2.py  # [NEW] Diagnostic — scans depth/rgb for corrupt files (cv2+PIL)
 ├── check_pointcloud.py          # [NEW] Diagnostic — point count, NaN/Inf, bounding box sanity check
@@ -73,9 +74,10 @@ End-to-end pipeline for detecting and quantifying lichen (*địa y*) on cinnamo
 | 5 | `03_recolor_mesh.py` | `trunk_mesh_poisson.ply` (falls back to `trunk_mesh_tsdf.ply`), `trunk_pointcloud.ply` | `trunk_mesh_recolored.ply` | KDTree color transfer; `--no-poisson` forces the old TSDF geometry |
 | 6 | `04_trim_mesh.py` | `trunk_mesh_recolored.ply`, `trunk_pointcloud.ply` | `trunk_mesh_trimmed.ply` | **[Sep 2026]** uses `trunk_pointcloud.ply` as a spatial reference mask (`--mask-radius`, default 5cm — see §5); old gravity-axis heuristic (`estimate_gravity()` — see §6) now fallback-only, `--no-pointcloud-mask` to force it |
 | 7 | `04b_finalize_mesh.py` | `trunk_mesh_trimmed.ply`, `imu.csv` | `trunk_mesh_final.ply` | Taubin smoothing + end caps; **[Sep 2026]** `trim_ragged_top()` now only cuts genuinely-sparse (near-empty) slices — see §5/§12 |
-| 8 | `05_detect_lichen.py` | `trunk_mesh_final.ply`, `trunk_pointcloud.ply` | `trunk_mesh_detected.ply`, `lichen_stats.json` | See §5/§6 for full patch chain and current thresholds |
+| 8 | `05_detect_lichen.py` | `trunk_mesh_final.ply`, `trunk_pointcloud.ply`, `lichen_model.json`, raw frames | `trunk_mesh_detected.ply`, `lichen_stats.json` | **[Sep 26 2026] Now runs the label-fitted model by default** (§12 item 22; F1 40.6% vs 13.0% on held-out trees), falling back to `classify_lichen_local_contrast` if the model file, `annotate_lichen`, the point cloud or usable colour is missing. `--legacy-detector` forces the old path. Colour is aggregated from the raw frames on first run (~2 min/scan, cached in `annotate/<scan>/colors.npz`). Stats gain a `detector` block, `point_level_pct` and an explicit `WARNING` string — **`lichen_ratio_pct` per tree remains untrustworthy**, see §12 item 22 |
 | opt | `06_slope_analysis.py` | `trunk_pointcloud.ply`, `imu.csv`, `odometry.csv` | `slope_info.json` | Also has `--batch` mode → `slope_summary.json` |
 | opt | `07_preview.py --raw-data <dir>` | `output/*.ply` only (no raw data needed) | Dash server, port 8050 | For visual QA of any result |
+| all | `run_full_pipeline.py --all <raw-data-root>` | — | — | **[Sep 26 2026]** Runs every subdirectory containing `depth/`, each in its own subprocess so one bad scan cannot take the batch down; prints a pass/fail table and exits non-zero on any failure. Combine with `--from-step 8` to re-detect only. The file's docstring is the end-to-end description of all eight steps |
 
 ### 3b. Server pipeline (`3d_scan/app/services/pipeline.py`) — [UNVERIFIED / other branch, not exercised this session]
 
@@ -639,7 +641,9 @@ docker run -p 8000:8000 -e TSDF_VOXEL_SIZE=0.008 lichen-server
     - **A corpus-level coverage estimate from the hand labels**, which is a real, defensible number: **23.2% mean, 95% CI 14.4%–32.0%** over the 10 labelled trees (sd 12.3 points). Halving that interval needs roughly **40 labelled trees**. Note this inherits the selection bias in §12 item 20 — trees were chosen partly for visible lichen on the sunlit side — so it describes the scanned sample, not the plantation.
     - **Not** a per-tree percentage. Any figure of that kind, from the current pipeline or from this model, should be treated as unsupported.
 
-    **Consequence for the pipeline:** replacing `05_detect_lichen.py` with this model would improve the map and leave `lichen_ratio_pct` no more meaningful than it is now. Decide what the deliverable is before integrating. The shipped detector remains untouched.
+    **[DONE Sep 26 2026 — integrated, and the corpus regenerated.]** The model is now step 8's default (`lichen_model.json`, trained by `annotate_lichen.py train` on all 10 trees / 165,887 labelled points), with automatic fallback to `classify_lichen_local_contrast` and `--legacy-detector` to force the old path. **`run_full_pipeline.py --all "<raw>" --from-step 8` re-ran all 49 scans: 49/49 OK, 0 failures, 0 fallbacks, 25 minutes.** Every `lichen_stats.json` now carries a `detector` block, `point_level_pct` (resolution-independent) and a `WARNING` string.
+
+    **This improves the map, not the quantity.** `lichen_ratio_pct` per tree is exactly as untrustworthy as before — that was never what changed. The only coverage figure that may be published is the corpus estimate from the hand labels: **23.2%, 95% CI 14.4–32.0%, n = 10**. The warning is printed at the end of every single-scan run and every corpus run, and stored in every stats file, so the number cannot be lifted out without it.
 
 ---
 
