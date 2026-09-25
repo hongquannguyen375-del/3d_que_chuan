@@ -3,50 +3,124 @@
 """
 run_full_pipeline.py
 =====================
-Chạy TOÀN BỘ pipeline xử lý 1 scan cây quế, từ dữ liệu thô (rgb.mp4, depth/,
-camera_matrix.csv, odometry.csv, imu.csv, location.csv) cho đến file mesh 3D
-cuối cùng đã tô màu + phát hiện địa y.
+Chạy toàn bộ pipeline xử lý MỘT cây quế — hoặc cả thư mục dữ liệu với --all —
+từ dữ liệu thô của app quét cho tới mesh 3D đã tô màu và đánh dấu địa y.
 
-Script này KHÔNG viết lại logic xử lý — nó chỉ gọi lần lượt (subprocess) các
-file .py đã có sẵn trong dự án 3D_Que_lichen theo đúng thứ tự, kiểm tra input
-đầu vào trước khi chạy, và kiểm tra output sau mỗi bước để phát hiện lỗi sớm
-thay vì chạy hết rồi mới biết bị hỏng ở bước nào.
+Script này KHÔNG chứa logic xử lý. Nó gọi lần lượt các script đã có theo đúng
+thứ tự, kiểm tra input trước mỗi bước và output sau mỗi bước, để hỏng ở đâu
+biết ngay ở đó thay vì chạy hết rồi mới phát hiện.
+
+
+QUY TRÌNH — 8 BƯỚC, TỪ VIDEO ĐẾN ĐỊA Y
+======================================
+
+  vào:  rgb.mp4 · depth/ · camera_matrix.csv · odometry.csv · imu.csv
+
+  1  01_extract_rgb_frames.py     tách video thành khung ảnh JPEG
+                                  -> rgb/*.jpg
+
+  2  02_pointcloud_and_mesh.py    chiếu ngược ảnh độ sâu + màu thành đám mây
+                                  điểm 3D của CẢ CẢNH, gộp theo tư thế camera
+                                  -> output/pointcloud.ply
+
+  3  05_trunk_isolation.py        tách riêng THÂN CÂY MỤC TIÊU ra khỏi cảnh.
+                                  Đây là bước nhiều cơ chế nhất: neo theo tia
+                                  nhìn của camera để biết cây nào là mục tiêu,
+                                  cắt trụ bám theo trục thật của thân, lọc cây
+                                  xanh, tách nhánh, bỏ lát đất.
+                                  -> output/trunk_pointcloud.ply
+
+  4a 02_mesh_tsdf.py              (MẶC ĐỊNH BỎ QUA, cần --with-tsdf)
+                                  Cách dựng mesh cũ. Đã bị thay vì để lại lỗ
+                                  lớn trên vùng đã quét — xem CLAUDE.md §12
+                                  item 15.
+
+  4b 02_mesh_poisson_trunk.py     dựng mesh từ đám mây điểm thân cây. Cắt các
+                                  lát không khép vòng (chỗ camera không đi hết
+                                  vòng quanh) rồi cắt phẳng hai đầu.
+                                  -> output/trunk_mesh_poisson.ply
+
+  5  03_recolor_mesh.py           chuyển màu từ đám mây điểm sang đỉnh mesh
+                                  -> output/trunk_mesh_recolored.ply
+
+  6  04_trim_mesh.py              bỏ phần mesh không thuộc thân, dùng chính
+                                  trunk_pointcloud.ply làm mặt nạ
+                                  -> output/trunk_mesh_trimmed.ply
+
+  7  04b_finalize_mesh.py         làm mịn Taubin, bịt hai đầu
+                                  -> output/trunk_mesh_final.ply
+
+  8  05_detect_lichen.py          đánh dấu địa y + chia trên/dưới dốc + tính
+                                  diện tích
+                                  -> output/trunk_mesh_detected.ply
+                                  -> output/lichen_stats.json
+
+  phụ 06_slope_analysis.py        độ nghiêng thân, hướng nghiêng (--with-slope)
+
+
+BƯỚC 8 ĐANG DÙNG GÌ, VÀ CON SỐ NÀO ĐÁNG TIN
+===========================================
+
+Từ tháng 9/2026 bước 8 dùng mô hình chỉnh theo NHÃN TAY (lichen_model.json,
+huấn luyện trên 10 cây được tô tay, 165.887 điểm có nhãn). Đo bằng cách bỏ
+một cây ra mỗi lần:
+
+      F1 trên cây chưa từng thấy     mô hình mới 40,6%     hàm cũ 13,0%
+
+Nhưng phải nói rõ, vì nó quyết định con số nào được phép đưa vào báo cáo:
+
+  DÙNG ĐƯỢC   vị trí địa y trên thân — trunk_mesh_detected.ply
+
+  KHÔNG DÙNG  tỉ lệ phần trăm của TỪNG CÂY (lichen_ratio_pct). Đo trên 10 cây
+  ĐƯỢC        có nhãn: tương quan với sự thật chỉ +0,07, và đoán một con số cố
+              định cho mọi cây còn chính xác hơn gấp đôi. Nguyên nhân: chênh
+              lệch màu giữa địa y và vỏ biến thiên 3 lần giữa các cây và không
+              đo được nếu không có nhãn của chính cây đó. Năm cách chữa đã thử
+              và thất bại — CLAUDE.md §12 item 22.
+
+  CON SỐ      ước lượng cấp corpus lấy trực tiếp từ nhãn tay:
+  BÁO CÁO         23,2%   khoảng tin cậy 95%: 14,4% – 32,0%   (n = 10 cây)
+  ĐƯỢC        Con số này kế thừa cách chọn cây khi đi quay (§12 item 20) nên
+              mô tả MẪU ĐÃ QUÉT, không phải cả vườn.
+
+--legacy-detector để quay về hàm HSV cũ.
+
 
 CÁCH DÙNG
 ---------
-1. Copy file này vào đúng thư mục gốc của repo 3D_Que_lichen (cùng cấp với
-   các file 01_..., 02_..., 03_... v.v.)
-2. Chạy:
-       python run_full_pipeline.py "duong/dan/toi/thu_muc_scan"
+Một cây:
+    python run_full_pipeline.py "D:\Backup\Thucdia-18May2026\cay_0007_1805"
 
-   Ví dụ (Windows):
-       python run_full_pipeline.py "E:\\3D_Que\\Raw_data\\26Q1"
+Cả thư mục dữ liệu:
+    python run_full_pipeline.py --all "D:\Backup\Thucdia-18May2026"
 
-   Thư mục scan phải chứa: rgb.mp4, depth/, camera_matrix.csv, odometry.csv,
-   imu.csv, location.csv  (đây là dữ liệu thô xuất ra từ app quét).
+Chạy lại từ một bước (ví dụ chỉ dò lại địa y cho cả corpus):
+    python run_full_pipeline.py --all "D:\Backup\Thucdia-18May2026" --from-step 8
 
-3. Kết quả cuối cùng sẽ nằm ở:
-       <thu_muc_scan>/output/trunk_mesh_detected.ply   <-- MODEL 3D CUỐI CÙNG
-       <thu_muc_scan>/output/lichen_stats.json         <-- thống kê địa y
+Kết quả mỗi cây:
+    <scan>/output/trunk_mesh_detected.ply   model 3D cuối cùng
+    <scan>/output/lichen_stats.json         thống kê (kèm trường WARNING)
+
 
 TÙY CHỌN
 --------
-  --scripts-dir DIR   Thư mục chứa các script 01_..09_... (mặc định: cùng
-                       thư mục với file run_full_pipeline.py này)
-  --trunk-radius R    Bán kính (m) quanh trục thân cây khi cô lập point cloud
-                       (mặc định 0.30, tăng lên nếu thân cây to hơn)
-  --skip-lichen       Dừng lại ở bước làm mịn (trunk_mesh_final.ply), không
-                       chạy bước phát hiện địa y
-  --with-slope        Chạy thêm bước phân tích độ dốc (06_slope_analysis.py)
-  --resume            Bỏ qua các bước mà file output đã tồn tại (chạy tiếp
-                       từ chỗ bị dừng thay vì làm lại từ đầu)
-  --python PATH       Đường dẫn tới trình thông dịch python muốn dùng để gọi
-                       các script con (mặc định: dùng cùng python đang chạy
-                       file này)
+  --all               Chạy cho MỌI thư mục con của đường dẫn đã cho. Mỗi cây
+                       chạy trong một tiến trình riêng, cây này hỏng không làm
+                       dừng các cây còn lại; cuối cùng in bảng tổng kết.
+  --scripts-dir DIR   Thư mục chứa các script 01_..09_...
+  --trunk-radius R    Bán kính (m) cô lập thân cây (mặc định 0.30)
+  --skip-lichen       Dừng ở bước 7, không chạy bước 8
+  --legacy-detector   Bước 8 dùng hàm HSV cũ thay vì mô hình nhãn tay
+  --with-slope        Chạy thêm 06_slope_analysis.py
+  --with-tsdf         Chạy thêm bước 4a (mesh TSDF, không ai đọc nữa)
+  --poisson-depth N   Độ sâu Poisson cho bước 4b
+  --from-step ID      Bỏ qua các bước trước mốc này (1,2,3,4,4b,5,6,7,8)
+  --resume            Bỏ qua bước nào đã có output
+  --force             Chạy lại mọi bước, đè lên output cũ
+  --python PATH       Trình thông dịch dùng để gọi script con
 
-Nếu 1 bước bị lỗi, script sẽ DỪNG NGAY, in rõ bước nào lỗi, lý do, và toàn bộ
-log (stdout+stderr) của bước đó để bạn biết chính xác cần sửa gì, thay vì cố
-chạy tiếp với dữ liệu hỏng.
+Một bước lỗi thì DỪNG NGAY cây đó, in rõ bước nào, lý do, và toàn bộ log của
+bước đó.
 """
 
 from __future__ import annotations
@@ -274,13 +348,87 @@ def check_script_modules(python_exe: str, script_path: Path) -> None:
 #  Main
 # --------------------------------------------------------------------------- #
 
+def run_corpus(args) -> None:
+    """Chạy pipeline cho mọi thư mục con, mỗi cây một tiến trình riêng.
+
+    Gọi lại chính file này thay vì lặp trong bộ nhớ: một cây hỏng — hết RAM,
+    dữ liệu thô thiếu, script con chết — không kéo theo cả lượt, và mỗi cây có
+    log riêng đọc được.
+    """
+    root = Path(args.scan_dir).resolve()
+    if not root.is_dir():
+        die(f"Không tìm thấy thư mục: {root}")
+    scans = sorted(d for d in root.iterdir()
+                   if d.is_dir() and (d / "depth").is_dir())
+    if not scans:
+        die(f"Không có thư mục scan nào trong {root} "
+            f"(tìm thư mục con có chứa depth/)")
+
+    banner(f"CHẠY CẢ CORPUS — {len(scans)} cây trong {root}")
+
+    passthrough = []
+    for flag, val in (("--scripts-dir", args.scripts_dir),
+                      ("--python", args.python),
+                      ("--from-step", args.from_step),
+                      ("--poisson-depth", args.poisson_depth),
+                      ("--trunk-radius", args.trunk_radius)):
+        if val is not None:
+            passthrough += [flag, str(val)]
+    for flag in ("skip_lichen", "legacy_detector", "with_slope", "with_tsdf",
+                 "resume", "force", "set_poisson_depth"):
+        if getattr(args, flag, False):
+            passthrough.append("--" + flag.replace("_", "-"))
+
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+
+    t0 = time.time()
+    ok, fail = [], []
+    for i, d in enumerate(scans, 1):
+        log(f"\n[{i}/{len(scans)}] {d.name}")
+        t1 = time.time()
+        rc = subprocess.call([args.python, str(Path(__file__).resolve()),
+                              str(d)] + passthrough, env=env)
+        dt = time.time() - t1
+        if rc == 0:
+            ok.append((d.name, dt))
+            log(f"  OK  [{dt:.0f}s]")
+        else:
+            fail.append((d.name, rc))
+            log(f"  LỖI (mã {rc}) — chạy riêng cây này để xem log đầy đủ")
+
+    banner("TỔNG KẾT CẢ CORPUS")
+    log(f"  Thành công : {len(ok)}/{len(scans)}")
+    if fail:
+        log(f"  Thất bại   : {len(fail)}")
+        for name, rc in fail:
+            log(f"      {name}  (mã {rc})")
+        log("\n  Chạy lại một cây để xem lỗi:")
+        log(f'      python "{Path(__file__).resolve()}" "{root / fail[0][0]}"')
+    log(f"\n  Tổng thời gian: {(time.time() - t0) / 60:.0f} phút")
+    if not args.skip_lichen:
+        log("\n  Nhắc lại: lichen_ratio_pct của TỪNG cây KHÔNG đáng tin")
+        log("  (tương quan +0,07 với nhãn tay trên 10 cây). Con số dùng được")
+        log("  cho báo cáo là ước lượng cấp corpus 23,2% (14,4–32,0%, n=10).")
+        log("  Chi tiết: CLAUDE.md §12 item 22.")
+    if fail:
+        sys.exit(1)
+
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Chạy toàn bộ pipeline 3D thân cây quế từ dữ liệu thô "
                      "đến model 3D cuối cùng.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("scan_dir", help="Đường dẫn tới thư mục scan (chứa rgb.mp4, depth/, ...)")
+    parser.add_argument("scan_dir",
+                         help="Thư mục scan. Với --all thì đây là thư mục "
+                              "CHA chứa nhiều thư mục scan.")
+    parser.add_argument("--all", action="store_true",
+                         help="Chạy cho mọi thư mục con. Mỗi cây một tiến "
+                              "trình riêng nên cây hỏng không làm dừng cả lượt.")
     parser.add_argument("--scripts-dir", default=None,
                          help="Thư mục chứa các script 01_..09_... "
                               "(mặc định: cùng thư mục với file này)")
@@ -288,6 +436,9 @@ def main() -> None:
                          help="Bán kính (m) cô lập thân cây (mặc định 0.30)")
     parser.add_argument("--skip-lichen", action="store_true",
                          help="Dừng ở bước làm mịn, không phát hiện địa y")
+    parser.add_argument("--legacy-detector", action="store_true",
+                         help="Bước 8 dùng hàm HSV cũ thay vì mô hình nhãn "
+                              "tay (F1 13,0%% so với 40,6%%, xem đầu file)")
     parser.add_argument("--with-slope", action="store_true",
                          help="Chạy thêm bước phân tích độ dốc địa hình")
     parser.add_argument("--with-tsdf", action="store_true",
@@ -320,6 +471,10 @@ def main() -> None:
     parser.add_argument("--python", default=sys.executable,
                          help="Đường dẫn python dùng để gọi các script con")
     args = parser.parse_args()
+
+    if args.all:
+        run_corpus(args)
+        return
 
     scan_dir = Path(args.scan_dir).resolve()
     if not scan_dir.exists() or not scan_dir.is_dir():
@@ -488,7 +643,8 @@ def main() -> None:
             run_step(
                 "8/8", "Phát hiện địa y trên mesh (05_detect_lichen.py)",
                 args.python, scripts_dir / "05_detect_lichen.py",
-                scan_args, scripts_dir,
+                scan_args + (["--legacy-detector"] if args.legacy_detector else []),
+                scripts_dir,
                 expected_outputs=[
                     out_dir / "trunk_mesh_detected.ply",
                     out_dir / "lichen_stats.json",
@@ -515,6 +671,11 @@ def main() -> None:
     log(f"  Model 3D cuối cùng : {final_model}")
     if not args.skip_lichen:
         log(f"  Thống kê địa y     : {out_dir / 'lichen_stats.json'}")
+        log("")
+        log("  LƯU Ý: 'lichen_ratio_pct' của một cây KHÔNG đáng tin (tương quan")
+        log("  +0,07 với nhãn tay trên 10 cây; đoán một số cố định còn chính xác")
+        log("  hơn gấp đôi). File kết quả có sẵn trường WARNING nói điều này.")
+        log("  Dùng được: VỊ TRÍ địa y trên thân. Xem CLAUDE.md §12 item 22.")
     log(f"\n  Xem trực quan bằng: python \"{scripts_dir / '07_preview.py'}\"")
     log("")
 
