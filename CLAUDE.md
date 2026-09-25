@@ -10,7 +10,7 @@ End-to-end pipeline for detecting and quantifying lichen (*địa y*) on cinnamo
 
 - **Institution:** VinUniversity, Hanoi
 - **Scale:** 500–1000 trees across 2–3 field sites (currently ~90 trees actively processed)
-- **Accuracy — [MEASURED Sep 21 2026, and the original claim is wrong].** The original docs claimed ~70% on clean samples (HSV adaptive thresholding) and this file has carried it flagged as never independently re-verified. It is now verified against hand labels on `cay_0004_1805` (§12 item 19): the active detector scores **precision 6.3%, recall 0.2%, F1 0.5%** — it finds 10 of 3,271 hand-marked lichen points, and reports 0.7% coverage where the annotator marked 17.9%. **Do not quote the 70% figure anywhere.** A label-fitted replacement measures **F1 41.3% on trees it has never seen** (three trees, leave-one-out — §12 item 20) against the shipped detector's 9.5% on the same test. **It is not in the pipeline and must not be put there yet: that F1 measures *where* lichen is on a trunk, and the same model's *per-tree total* is anti-correlated with the hand labels (§12 item 21).** See §9 and §12 items 4, 16, 18, 19, 20, 21.
+- **Accuracy — [MEASURED Sep 21 2026, and the original claim is wrong].** The original docs claimed ~70% on clean samples (HSV adaptive thresholding) and this file has carried it flagged as never independently re-verified. It is now verified against hand labels on `cay_0004_1805` (§12 item 19): the active detector scores **precision 6.3%, recall 0.2%, F1 0.5%** — it finds 10 of 3,271 hand-marked lichen points, and reports 0.7% coverage where the annotator marked 17.9%. **Do not quote the 70% figure anywhere.** A label-fitted replacement measures **F1 40.6% on trees it has never seen** (ten hand-labelled trees, leave-one-out — §12 item 22) against the shipped detector's 13.0% on the same test. **It is not in the pipeline. That F1 measures *where* lichen sits on a trunk; neither detector can measure *how much* — the per-tree percentage is uncorrelated with hand labels (r = +0.07, n = 10) and a single constant beats it by 2× (§12 item 22).** The only defensible coverage figure today is the corpus mean from hand labels: **23.2%, 95% CI 14.4–32.0%, n = 10**. See §9 and §12 items 4, 16, 18, 19, 20, 21, 22.
 
 > ⚠️ **Reconciliation note:** This file merges the original project CLAUDE.md with findings from an extended hands-on debugging session (Aug–Sep 2026). Where the two disagree, the debugging-session findings are marked **[VERIFIED]** because they were confirmed against the actual GitHub repo content and actual runtime behavior on the working machine. Anything only in the original docs and never touched during that session is marked **[UNVERIFIED / other branch]**.
 
@@ -594,6 +594,52 @@ docker run -p 8000:8000 -e TSDF_VOXEL_SIZE=0.008 lichen-server
     **So the per-tree total cannot be corrected by any route tried so far without labelling the tree being measured, which defeats the purpose.** What this approach delivers on current evidence is a *map* of where lichen sits on a trunk (F1 41.3%), not a *quantity*. **The one route not yet tried, and the one the 7-tree sample makes possible: a tree-level regression** — fit lichen % directly from a handful of tree-level summary statistics over ≥10 labelled trees, rather than deriving it by counting classified points. Ten points and two or three predictors is very small data, but it targets the deliverable directly instead of inheriting a per-point threshold's behaviour.
 
     **Evaluation sample already exported** (`annotate/`, 6 frames each, 42 frames total): `cay_0040`(62°), `cay_0024`(104°), `cay_0051`(115°), `cay_0041`(141°), `cay_0022`(238°), `cay_0035`(270°), `cay_0014`(316°). Chosen by sorting the 45 remaining scans by sun azimuth and taking every 6.4th — **not hand-picked, and weak captures deliberately not excluded** (`cay_0022` has R² 0.79 and a 1.79m sweep from an interrupted recording), because dropping bad scans would make the measured accuracy better than the truth. Only `cay_0003_1805` is excluded, as it will not be in the final results either way.
+
+22. **[NEW, Sep 26 2026 — SETTLED AT n=10] Colour-based detection produces a usable *map* of lichen on a trunk (F1 40.6%, 3.1× the shipped detector) and cannot produce a per-tree *percentage* by any of five methods tried. The corpus deliverable has to change shape.** Seven more trees were hand-labelled (6 frames each, chosen by systematic sampling over sun azimuth, weak captures deliberately included), bringing the labelled set to **10 trees spanning 11.4%–52.9% true coverage**.
+
+    **What works — localisation, confirmed at n=10** (`annotate_lichen.py cross`, leave-one-tree-out):
+
+    | | shipped `05_detect_lichen.py` | label-fitted |
+    |---|---|---|
+    | mean F1 over 10 held-out trees | **13.0%** | **40.6%** |
+
+    40.6% at n=10 against 41.3% at n=3 — the estimate is stable. Per-tree F1 ranges 26.3%–57.9% and tracks that tree's base rate, as precision must.
+
+    **What does not work — the per-tree percentage. The n=3 result in item 21 was wrong and is corrected here.** Item 21 reported r = −0.90 (anti-correlated) from three trees. **At n=10 the correlation is +0.07 — there is no relationship at all, in either direction.** The −0.90 was noise; three points can produce a fully inverted ranking by luck one time in six.
+
+    | scan | hand label | detector | ratio |
+    |---|---|---|---|
+    | `cay_0040` | **52.9%** | 41.6% | 0.79× |
+    | `cay_0041` | 31.3% | 42.8% | 1.37× |
+    | `cay_0007` | 26.7% | 34.7% | 1.30× |
+    | `cay_0051` | 27.7% | 41.0% | 1.48× |
+    | `cay_0022` | 18.9% | 37.2% | 1.97× |
+    | `cay_0004` | 17.9% | 38.3% | 2.14× |
+    | `cay_0036` | 15.4% | 44.2% | 2.87× |
+    | `cay_0024` | 15.2% | 43.2% | 2.84× |
+    | `cay_0014` | 14.8% | 31.7% | 2.14× |
+    | `cay_0035` | **11.4%** | 44.4% | 3.89× |
+
+    Truth spans **39.8 points**; the detector spans **12.7** and sits near 40% whatever the tree. **The decisive comparison, mean absolute error over the 10 trees:**
+
+    | method | mean abs error |
+    |---|---|
+    | detector, counting points above threshold | **19.0 pp** |
+    | guessing 40.8% for every tree | 20.1 pp |
+    | **guessing the corpus mean (22.8%) for every tree** | **8.8 pp** |
+
+    **A single constant beats the detector by more than 2×.** That settles counting-above-a-threshold as a route to coverage.
+
+    **Five methods tried, all failed.** (1) Raw count, above. (2) Adjusted count `(q−FPR)/(TPR−FPR)`. (3) Mixture fit to the score CDF — closest in absolute error but fails silently, its lowest fit residual landing on its worst estimate. (4) EM prior adjustment — saturates at exactly 100.0% raw; isotonic calibration fixes the saturation but not the correlation. (5) **Tree-level regression** — the route item 21 named as most promising, now tried with the 10 trees it needed. Nine label-free tree-level summary statistics, declared before measuring, each fitted as a one-variable linear model under leave-one-tree-out. Best (`sd` of the score distribution) gives 8.5 pp against a 10.2 pp baseline of predicting the other nine trees' mean. **A 2,000-run permutation test kills it: with shuffled labels the best-of-nine improves on the baseline by 1.0 pp on average and 2.3 pp at p90, so the real 1.6 pp gain gives p = 0.258.** Indistinguishable from chance.
+
+    **Why, in one line:** the over-count is governed by each tree's own lichen↔bark colour separation, which varies 3× across trees (a\* gap 0.581–1.765, r = −0.99 with the over-count factor at n=3) and **cannot be measured without labels for that tree** — four label-free proxies for it were declared in advance and all failed, because total feature spread is dominated by within-bark variation that is similar on every tree.
+
+    **What can still be delivered, and it is not nothing.**
+    - **A lichen map per trunk.** F1 40.6% on a tree never seen, against 13.0% for the shipped detector. Usable for "where on this trunk", not "how much".
+    - **A corpus-level coverage estimate from the hand labels**, which is a real, defensible number: **23.2% mean, 95% CI 14.4%–32.0%** over the 10 labelled trees (sd 12.3 points). Halving that interval needs roughly **40 labelled trees**. Note this inherits the selection bias in §12 item 20 — trees were chosen partly for visible lichen on the sunlit side — so it describes the scanned sample, not the plantation.
+    - **Not** a per-tree percentage. Any figure of that kind, from the current pipeline or from this model, should be treated as unsupported.
+
+    **Consequence for the pipeline:** replacing `05_detect_lichen.py` with this model would improve the map and leave `lichen_ratio_pct` no more meaningful than it is now. Decide what the deliverable is before integrating. The shipped detector remains untouched.
 
 ---
 
