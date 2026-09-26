@@ -594,7 +594,9 @@ def main():
 
     n_arb = sum(1 for r in recs if r.get("arbitrary"))
     n_low = sum(1 for r in recs if r.get("stab", 1.0) < STAB_MIN)
-    print("\nDa ghi: %s" % args.out)
+    # In duong dan tuyet doi: --out nhan duong dan tuong doi thi file roi vao
+    # thu muc dang dung, khong phai thu muc du an -- phai noi ro no o dau.
+    print("\nDa ghi: %s" % os.path.abspath(args.out))
     print("  %d cay, %d khu vuc" % (len(recs), len(sites)))
     for s in sites:
         print("    %-24s %2d cay" % (s["name"], len(s["recs"])))
