@@ -11,6 +11,7 @@ dash==4.4.1
 pydantic==2.13.4
 plotly==6.9.0
 imageio-ffmpeg==0.6.0
+openpyxl==3.1.5
 
 # Cac thu vien duoi day duoc open3d==0.19.0 tu dong cai kem (transitive dependency),
 # khong can khai bao tay - pip se tu chon dung ban tuong thich Python 3.10:
