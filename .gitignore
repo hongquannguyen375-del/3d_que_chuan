@@ -41,8 +41,12 @@ raw_data_validation_report.json
 # Anh de khoanh nhan bang tay (annotate_lichen.py) -- du lieu lam viec, khong theo doi
 annotate/
 
-# File Excel do export_lichen_excel.py sinh ra -- dung lai duoc trong 5 giay
-ty_le_dia_y*.xlsx
+# Moi file Excel, o bat ky dau -- KHONG day len GitHub. Gom ca file sinh
+# ra (ty_le_dia_y_*.xlsx) lan file sua tay (*_updated, *_tong_hop), va
+# file khoa tam ~$*.xlsx ma Excel tao khi dang mo mot file.
+*.xlsx
+*.xls
+*.xlsm
 
-# Cac file Excel ket qua -- sinh lai duoc bang export_lichen_excel.py
+# Thu muc ket qua cua export_lichen_excel.py
 ket_qua/
