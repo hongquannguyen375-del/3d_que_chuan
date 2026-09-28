@@ -36,6 +36,7 @@ if HERE not in sys.path:
 from kiem_tra import ply_is_sane
 
 DEFAULT_RAW = r"D:\Backup\Thucdia-18May2026"
+OUT_DIR = os.path.join(HERE, "ket_qua")      # noi gom cac file Excel
 TZ_HOURS = 7                 # gio Viet Nam so voi UTC
 SITE_RADIUS_M = 300.0        # gom cay thanh khu vuc
 FALLBACK_SIN = 0.1           # buoc 8 lui ve truc tuy tien duoi nguong nay
@@ -647,9 +648,17 @@ def main():
         description="Gop lichen_stats.json toan corpus thanh mot file Excel.")
     ap.add_argument("--raw-data", default=DEFAULT_RAW,
                     help="Thu muc goc chua cac cay (mac dinh: %s)" % DEFAULT_RAW)
-    ap.add_argument("--out", default=os.path.join(HERE, "ty_le_dia_y.xlsx"),
-                    help="Duong dan file Excel ghi ra")
+    ap.add_argument("--out", default="ty_le_dia_y.xlsx",
+                    help="File Excel ghi ra. Chi ghi TEN file thi luu vao "
+                         "thu muc ket_qua/ cua du an; ghi duong dan day du "
+                         "thi luu dung cho do.")
     args = ap.parse_args()
+
+    # Ten tran -> ket_qua/, de moi bang tinh gom ve mot cho thay vi rai ra goc
+    # du an (va rai ra bat ky thu muc nao dang dung khi go lenh).
+    if not os.path.dirname(args.out):
+        os.makedirs(OUT_DIR, exist_ok=True)
+        args.out = os.path.join(OUT_DIR, args.out)
 
     if not os.path.isdir(args.raw_data):
         sys.exit("Khong thay thu muc: %s" % args.raw_data)

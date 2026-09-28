@@ -61,7 +61,7 @@ def process_scan(scan_dir: str, verbose: bool = True,
         print(f"  Geometry source: {mesh_src} ({os.path.basename(mesh_path)})",
               flush=True)
     if not os.path.exists(pcd_path):
-        result["msg"] = "trunk_pointcloud.ply not found — chay 01_clean_pointcloud.py truoc"
+        result["msg"] = "trunk_pointcloud.ply not found — chay 05_trunk_isolation.py (buoc 3) truoc"
         return result
 
     t0 = time.time()

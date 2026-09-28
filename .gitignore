@@ -43,3 +43,6 @@ annotate/
 
 # File Excel do export_lichen_excel.py sinh ra -- dung lai duoc trong 5 giay
 ty_le_dia_y*.xlsx
+
+# Cac file Excel ket qua -- sinh lai duoc bang export_lichen_excel.py
+ket_qua/
