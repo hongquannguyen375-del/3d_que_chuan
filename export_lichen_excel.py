@@ -33,7 +33,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-from ply_check import ply_is_sane
+from kiem_tra import ply_is_sane
 
 DEFAULT_RAW = r"D:\Backup\Thucdia-18May2026"
 TZ_HOURS = 7                 # gio Viet Nam so voi UTC
@@ -193,7 +193,7 @@ def split_axis(scan_dir):
 
     # Kiem file TRUOC khi giao cho open3d. Mot byte hong lam open3d chet bang
     # segmentation fault o tang C -- try/except khong bat duoc, ca tien trinh
-    # di theo, va 48 cay lanh con lai khong ra duoc bang. Xem ply_check.py.
+    # di theo, va 48 cay lanh con lai khong ra duoc bang. Xem lenh "ply" trong kiem_tra.py.
     ok, why = ply_is_sane(mesh_path)
     if not ok:
         print("    BO QUA hinh hoc: %s" % why)
