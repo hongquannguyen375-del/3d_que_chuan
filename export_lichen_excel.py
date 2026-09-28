@@ -33,6 +33,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
+from ply_check import ply_is_sane
+
 DEFAULT_RAW = r"D:\Backup\Thucdia-18May2026"
 TZ_HOURS = 7                 # gio Viet Nam so voi UTC
 SITE_RADIUS_M = 300.0        # gom cay thanh khu vuc
@@ -45,6 +47,25 @@ CORPUS_CI = (14.4, 32.0)
 CORPUS_N = 10
 
 _DL = None
+
+
+def check_openpyxl():
+    """Bao thieu thu vien NGAY, thay vi doc het ca corpus roi moi bao.
+
+    openpyxl chi duoc nap trong write_excel(), tan cuoi chuong trinh. Chay
+    bang python he thong (khong phai venv cua du an) thi no thieu, va loi chi
+    hien ra sau khi da doc xong moi cay -- mat cong vo ich.
+    """
+    try:
+        import openpyxl  # noqa: F401
+    except ImportError:
+        sys.exit("Thieu thu vien 'openpyxl'.\n"
+                 "Dang chay bang: %s\n"
+                 "Neu do khong phai venv cua du an thi dung venv:\n"
+                 '    D:\\Lichen_project\\venv\\Scripts\\python.exe '
+                 "export_lichen_excel.py ...\n"
+                 "Hoac cai vao python dang dung:  pip install openpyxl"
+                 % sys.executable)
 
 
 def check_writable(path):
@@ -169,6 +190,15 @@ def split_axis(scan_dir):
     mesh_path = os.path.join(scan_dir, "output", "trunk_mesh_final.ply")
     if not os.path.exists(mesh_path):
         return None, None, None
+
+    # Kiem file TRUOC khi giao cho open3d. Mot byte hong lam open3d chet bang
+    # segmentation fault o tang C -- try/except khong bat duoc, ca tien trinh
+    # di theo, va 48 cay lanh con lai khong ra duoc bang. Xem ply_check.py.
+    ok, why = ply_is_sane(mesh_path)
+    if not ok:
+        print("    BO QUA hinh hoc: %s" % why)
+        return None, None, None
+
     verts = np.asarray(o3d.io.read_triangle_mesh(mesh_path).vertices)
     if len(verts) < 10:
         return None, None, None
@@ -225,6 +255,34 @@ def read_position(scan_dir):
     out["alt"] = statistics.median(f[3] for f in best)
     out["acc"] = statistics.median(f[0] for f in best)
     return out
+
+
+def find_scans(raw_root):
+    """Moi thu muc con co output/lichen_stats.json deu la mot cay.
+
+    KHONG loc theo tien to 'cay_': cac bo du lieu dat ten khac nhau -- bo
+    18May dung 'cay_0007_1805', bo Jun2026 dung 'TM-tra-my-1__video_...'.
+    Loc theo ket qua that su co thi dung cho moi bo, va tu dong bo qua cac
+    thu muc khong phai cay nhu 'samples'.
+    """
+    out = []
+    for name in sorted(os.listdir(raw_root)):
+        d = os.path.join(raw_root, name)
+        if os.path.isdir(d) and os.path.exists(
+                os.path.join(d, "output", "lichen_stats.json")):
+            out.append(name)
+    return out
+
+
+def short_name(scan):
+    """Ten ngan de liet ke trong sheet khu vuc.
+
+    'cay_0007_1805' -> '0007'. Ten kieu khac thi cat phan duoi '__video_...'
+    vi no chi la dau thoi gian, khong phan biet cay.
+    """
+    if scan.startswith("cay_") and len(scan) >= 8:
+        return scan[4:8]
+    return scan.split("__video")[0].split("_video")[0]
 
 
 def read_scan(raw_root, name):
@@ -304,16 +362,38 @@ def assign_sites(recs):
     groups.sort(key=lambda g: -len(g))
     sites = []
     for g in groups:
-        names = [r["place"] for r in g if r["place"]]
-        # Ten dia danh trong o mot so ban ghi -> lay ten cua cac cay cung cum.
-        label = max(set(names), key=names.count) if names else u"Không rõ tên"
+        places = [r["place"] for r in g if r["place"]]
+        gps_place = max(set(places), key=places.count) if places else u""
+        label = gps_place or label_from_folders(g)
         for r in g:
             r["site"] = label
-        sites.append({"name": label, "recs": g,
-                      "n_named": sum(1 for r in g if r["place"])})
+            r["gps_place"] = gps_place
+        sites.append({"name": label, "gps_place": gps_place, "recs": g,
+                      "n_named": len(places)})
     for r in recs:
         r.setdefault("site", u"Không có GPS")
+        r.setdefault("gps_place", u"")
     return sites
+
+
+def label_from_folders(group):
+    """Ten cum khi location.csv khong co dia danh.
+
+    Nhieu bo du lieu dat ten thu muc theo noi quet ('Tra-leng-1__video_...'),
+    nen tien to chung cua ca cum thuong chinh la dia danh. Khi tien to do qua
+    ngan de co nghia -- vi du cum chi gom 'TV4', 'TV5', 'Tv4' -- thi khong doan
+    bua, ma neu ten mot thanh vien de nguoi doc tu nhan ra.
+    """
+    shorts = sorted(short_name(r["scan"]) for r in group)
+    if len(shorts) > 1:
+        lo, hi = shorts[0].lower(), shorts[-1].lower()
+        i = 0
+        while i < min(len(lo), len(hi)) and lo[i] == hi[i]:
+            i += 1
+        prefix = shorts[0][:i].rstrip("-_ 0123456789")
+        if len(prefix) >= 3:
+            return prefix
+    return u"Chưa có tên — %s" % shorts[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -367,7 +447,8 @@ def write_excel(recs, sites, out_path, raw_data):
             compass(rec["bear_a"]) if rec.get("bear_a") is not None else "",
             rec.get("pct_b"), rec.get("bear_b"),
             compass(rec["bear_b"]) if rec.get("bear_b") is not None else "",
-            u"tùy tiện" if rec.get("arbitrary") else u"thân nghiêng",
+            (u"không đọc được mesh" if rec.get("arbitrary") is None
+             else (u"tùy tiện" if rec["arbitrary"] else u"thân nghiêng")),
             rec.get("tilt"), rec.get("stab"),
         ]
         for i, v in enumerate(vals, 1):
@@ -383,7 +464,7 @@ def write_excel(recs, sites, out_path, raw_data):
                 c.number_format = "0"
             elif i == 20:
                 c.number_format = "0.00"
-        if rec.get("arbitrary"):
+        if rec.get("arbitrary") is not False:
             ws.cell(row=r, column=18).fill = warn_fill
         if rec.get("stab", 1.0) < STAB_MIN:
             ws.cell(row=r, column=20).fill = warn_fill
@@ -412,7 +493,8 @@ def write_excel(recs, sites, out_path, raw_data):
 
     # ---- Sheet 2: khu vuc -------------------------------------------------- #
     ws2 = wb.create_sheet(u"Khu vực")
-    head2 = [(u"Khu vực", 22), (u"Số cây", 8), (u"Vĩ độ", 12), (u"Kinh độ", 12),
+    head2 = [(u"Khu vực", 22), (u"Địa danh GPS\nbáo về", 16), (u"Số cây", 8),
+             (u"Vĩ độ", 12), (u"Kinh độ", 12),
              (u"Độ cao TB\n(m)", 11), (u"Bán kính khu\n(m)", 13),
              (u"Thời gian quét", 20), (u"Địa y % mesh\n(TB)", 13),
              (u"Địa y % điểm\n(TB)", 13), (u"Cây", 60)]
@@ -434,25 +516,28 @@ def write_excel(recs, sites, out_path, raw_data):
                              max(times).strftime("%H:%M"))) if times else ""
         pm = [r["pct_mesh"] for r in g if r.get("pct_mesh") is not None]
         pp = [r["pct_point"] for r in g if r.get("pct_point") is not None]
-        vals = [site["name"], len(g), lat, lon,
+        vals = [site["name"], site.get("gps_place", ""), len(g), lat, lon,
                 statistics.median(r["alt"] for r in g), radius, span,
                 round(sum(pm) / len(pm), 1) if pm else None,
                 round(sum(pp) / len(pp), 1) if pp else None,
-                ", ".join(sorted(r["scan"][4:8] for r in g))]
+                ", ".join(sorted(short_name(r["scan"]) for r in g))]
         for i, v in enumerate(vals, 1):
             c = ws2.cell(row=k, column=i, value=v)
             c.border = box
-            if i in (3, 4):
+            if i in (4, 5):
                 c.number_format = "0.00000"
-            elif i in (5, 6, 8, 9):
+            elif i in (6, 7, 9, 10):
                 c.number_format = "0.0"
         if site["n_named"] < len(g):
             ws2.cell(row=k, column=1).fill = warn_fill
 
     ws2.cell(row=len(sites) + 3, column=1,
-             value=u"Ô tên khu vực tô vàng: một số cây trong cụm không có tên "
-                   u"địa danh trong location.csv; tên lấy từ các cây cùng cụm "
-                   u"GPS.").font = Font(italic=True, size=9)
+             value=u"Ô tên khu vực tô vàng: một số cây trong cụm không có địa "
+                   u"danh trong location.csv. Khi cả cụm đều trống, tên lấy từ "
+                   u"tiền tố chung của tên thư mục. Cột 'Địa danh GPS báo về' "
+                   u"là thứ điện thoại ghi lại — nó có thể thô hơn hoặc lệch "
+                   u"so với tên thực địa, nên hai cột được để riêng thay vì "
+                   u"gộp làm một.").font = Font(italic=True, size=9)
 
     # ---- Sheet 3: canh bao ------------------------------------------------- #
     ws3 = wb.create_sheet(u"Đọc trước khi dùng")
@@ -568,12 +653,16 @@ def main():
 
     if not os.path.isdir(args.raw_data):
         sys.exit("Khong thay thu muc: %s" % args.raw_data)
+    check_openpyxl()
     check_writable(args.out)
 
-    names = sorted(d for d in os.listdir(args.raw_data)
-                   if d.startswith("cay_")
-                   and os.path.isdir(os.path.join(args.raw_data, d)))
-    print("Tim thay %d thu muc cay trong %s" % (len(names), args.raw_data))
+    names = find_scans(args.raw_data)
+    n_dirs = sum(1 for d in os.listdir(args.raw_data)
+                 if os.path.isdir(os.path.join(args.raw_data, d)))
+    print("Tim thay %d cay co ket qua (trong %d thu muc con) o %s"
+          % (len(names), n_dirs, args.raw_data))
+    if not names:
+        sys.exit("Khong thu muc con nao co output/lichen_stats.json")
 
     recs, skipped = [], []
     for i, name in enumerate(names, 1):
@@ -584,10 +673,9 @@ def main():
         else:
             recs.append(rec)
     if not recs:
-        sys.exit("Khong cay nao co lichen_stats.json")
+        sys.exit("Khong doc duoc cay nao")
     if skipped:
-        print("\nBo qua %d cay khong co lichen_stats.json: %s"
-              % (len(skipped), ", ".join(skipped)))
+        print("\nBo qua %d cay: %s" % (len(skipped), ", ".join(skipped)))
 
     sites = assign_sites(recs)
     write_excel(recs, sites, args.out, args.raw_data)
